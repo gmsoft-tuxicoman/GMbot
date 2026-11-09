@@ -47,6 +47,20 @@ class FakeIRC:
     def channel_members(self, channel):
         return ["alice", "bob", "GMbot"]
 
+    channels = ["#c"]
+
+    def notice(self, target, text):
+        self.sent.append(("notice", target, text))
+
+    def action(self, target, text):
+        self.sent.append(("action", target, text))
+
+    def join(self, channel, key=""):
+        self.sent.append(("join", channel))
+
+    def part(self, channel, reason=""):
+        self.sent.append(("part", channel, reason))
+
 
 class FakeLLM:
     def __init__(self, replies):
@@ -64,6 +78,7 @@ class FakeLLM:
 def make_bot(tmp_path, replies):
     cfg = Config(base_dir=tmp_path)
     cfg.bot.debounce_seconds = 0
+    cfg.bot.private_messages = True
     (tmp_path / "INSTRUCTIONS.md").write_text("persona")
     bot = Bot(cfg)
     bot.irc = FakeIRC()
@@ -71,8 +86,8 @@ def make_bot(tmp_path, replies):
     return bot
 
 
-async def say(bot, nick, text, target="#c"):
-    await bot.on_message(nick, target, text, False)
+async def say(bot, nick, text, target="#c", account=None):
+    await bot.on_message(nick, target, text, False, account)
     await asyncio.sleep(0.01)
 
 
@@ -101,7 +116,7 @@ async def test_timeout_goes_idle(tmp_path):
     bot = make_bot(tmp_path, ["yo"])
     bot.cfg.bot.conversation_timeout = 0
     await say(bot, "alice", "GMbot hi")
-    bot._convs["#c"].timeout = 0
+    bot.convs["#c"].timeout = 0
     await asyncio.sleep(0.01)
     await say(bot, "alice", "anything")
     assert len(bot.llm.calls) == 1
@@ -159,3 +174,30 @@ def test_memory_disabled_has_no_rules():
 
     assert "REMEMBER" not in system_prompt("", "GMbot", "net", "#c", [])
     assert "(nothing yet)" in system_prompt("", "GMbot", "net", "#c", [], memory="")
+
+
+def test_is_repeat():
+    from gmbot.conversation import is_repeat
+
+    assert is_repeat("Yeah, that works!", ["yeah that works"], 1.0)
+    assert is_repeat("yeah that works fine", ["yeah that work fine"], 0.9)
+    assert not is_repeat("yeah that works fine", ["yeah that work fine"], 1.0)
+    assert not is_repeat("try the lts kernel", ["yeah that works"], 0.9)
+
+
+@pytest.mark.asyncio
+async def test_repeat_triggers_retry(tmp_path):
+    bot = make_bot(tmp_path, ["use the lts kernel", "use the lts kernel!", "or try 6.12 maybe"])
+    await say(bot, "alice", "GMbot which kernel?")
+    await say(bot, "alice", "hmm?")
+    assert bot.irc.sent == [("#c", "use the lts kernel"), ("#c", "or try 6.12 maybe")]
+    assert "already said that" in bot.llm.calls[-1][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_repeat_twice_stays_quiet(tmp_path):
+    bot = make_bot(tmp_path, ["use the lts kernel", "use the lts kernel", "Use the LTS kernel."])
+    await say(bot, "alice", "GMbot which kernel?")
+    await say(bot, "alice", "hmm?")
+    assert bot.irc.sent == [("#c", "use the lts kernel")]
+    assert bot.convs["#c"].active

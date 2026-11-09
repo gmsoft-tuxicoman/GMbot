@@ -6,8 +6,9 @@ import asyncio
 import logging
 import signal
 
+from .commands import Commands
 from .config import Config
-from .conversation import Conversation, mentions, parse_reply
+from .conversation import Conversation, Decision, is_repeat, mentions, parse_reply
 from .history import Entry, History, Instructions, build_messages, system_prompt
 from .irc import IRCClient, irc_lower, is_channel, strip_formatting
 from .llm import LLMClient
@@ -26,13 +27,17 @@ class Bot:
         self.instructions = Instructions(cfg.instructions_path)
         self.memory = Memory(cfg.memory_path, cfg.bot.memory_max_facts) if cfg.bot.memory_enabled else None
         self.ignore = {irc_lower(n) for n in cfg.bot.ignore}
-        self._convs: dict[str, Conversation] = {}
+        self.convs: dict[str, Conversation] = {}
+        self.muted: set[str] = set()
+        self.commands = Commands(self)
+        self._stop = asyncio.Event()
+        self._quit_message = cfg.irc.quit_message
         self._locks: dict[str, asyncio.Lock] = {}
         self._pending: dict[str, asyncio.Task] = {}
 
     async def run(self) -> None:
         self.instructions.text  # load early so a bad path shows up at startup
-        stop = asyncio.Event()
+        stop = self._stop
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)
@@ -41,7 +46,7 @@ class Bot:
         try:
             await asyncio.wait({irc_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
             if stop.is_set():
-                await self.irc.quit(self.cfg.irc.quit_message)
+                await self.irc.quit(self._quit_message)
                 irc_task.cancel()
             await asyncio.gather(irc_task, return_exceptions=stop.is_set())
         finally:
@@ -50,16 +55,48 @@ class Bot:
                 loop.remove_signal_handler(sig)
             await self.llm.aclose()
 
-    def _conv(self, key: str) -> Conversation:
-        if key not in self._convs:
-            self._convs[key] = Conversation(self.cfg.bot.conversation_timeout)
-        return self._convs[key]
+    def request_quit(self, message: str) -> None:
+        self._quit_message = message
+        self._stop.set()
 
-    async def on_message(self, nick: str, target: str, text: str, is_action: bool) -> None:
+    def reset(self, key: str, clear_history: bool = True) -> None:
+        """Go idle in a target, optionally dropping its stored conversation."""
+        if pending := self._pending.pop(key, None):
+            pending.cancel()
+        if key in self.convs:
+            self.convs[key].end()
+        if clear_history:
+            self.history.clear(key)
+
+    def say(self, target: str, text: str, action: bool = False) -> None:
+        """Send a line as the bot (from an owner command) and record it in the history."""
+        if action:
+            self.irc.action(target, text)
+        else:
+            text = self.irc.privmsg(target, text)
+        self.history.add(irc_lower(target), Entry(nick=self.irc.nick, text=text, is_bot=True, is_action=action))
+
+    def _conv(self, key: str) -> Conversation:
+        if key not in self.convs:
+            self.convs[key] = Conversation(self.cfg.bot.conversation_timeout)
+        return self.convs[key]
+
+    async def on_message(
+        self, nick: str, target: str, text: str, is_action: bool, account: str | None = None
+    ) -> None:
         key = irc_lower(target)
         text = strip_formatting(text)
+        if not is_action and self.commands.is_command(text) and self.commands.is_owner(nick, account):
+            # Owner commands are handled here and never reach the history or the LLM.
+            await self.commands.handle(nick, target, text)
+            return
+        if not is_channel(target) and not self.cfg.bot.private_messages:
+            log.debug("ignoring private message from %s (private_messages is off)", nick)
+            return
         self.history.add(key, Entry(nick=nick, text=text, is_action=is_action))
         if irc_lower(nick) in self.ignore or irc_lower(nick) == irc_lower(self.irc.nick):
+            return
+        if key in self.muted:
             return
 
         conv = self._conv(key)
@@ -94,6 +131,45 @@ class Bot:
             except Exception:
                 log.exception("[%s] failed to respond", target)
 
+    async def _generate(self, messages: list[dict], target: str, conv: Conversation) -> Decision | None:
+        raw = await self.llm.chat(messages)
+        if raw is None:
+            return None
+        if not conv.active:
+            log.info("[%s] conversation stopped during generation, dropping reply", target)
+            return None
+        log.debug("[%s] llm raw: %r", target, raw)
+        return parse_reply(raw, self.irc.nick, self.cfg.bot.max_reply_chars)
+
+    def _is_repeat(self, key: str, text: str) -> bool:
+        n = self.cfg.bot.repeat_check_lines
+        if n <= 0:
+            return False
+        recent = [e.text for e in self.history.entries(key) if e.is_bot][-n:]
+        return is_repeat(text, recent, self.cfg.bot.repeat_similarity)
+
+    async def _retry_repeat(
+        self, messages: list[dict], first: Decision, key: str, target: str, conv: Conversation
+    ) -> Decision | None:
+        """The model repeated itself: ask once for something new, and drop the line if it repeats again."""
+        log.info("[%s] reply repeats an earlier line, retrying: %s", target, first.text)
+        retry = messages + [
+            {"role": "assistant", "content": first.text},
+            {
+                "role": "user",
+                "content": "(note from the system, not a chat message: you already said that. don't repeat "
+                "yourself. say something different, or output [SKIP] or [END])",
+            },
+        ]
+        second = await self._generate(retry, target, conv)
+        if second is None and not conv.active:
+            return None
+        memories = first.memories + (second.memories if second else [])
+        if second and second.text and not self._is_repeat(key, second.text):
+            return Decision(second.text, second.end, memories)
+        log.info("[%s] still repeating, staying quiet", target)
+        return Decision(None, first.end or bool(second and second.end), memories)
+
     async def _respond(self, key: str, target: str, conv: Conversation) -> None:
         where = target if is_channel(target) else f"a private chat with {target}"
         members = self.irc.channel_members(target) if is_channel(target) else [target, self.irc.nick]
@@ -105,11 +181,13 @@ class Bot:
             self.cfg.llm.context_budget_tokens,
             self.cfg.llm.max_tokens,
         )
-        raw = await self.llm.chat(messages)
-        if raw is None:
+        decision = await self._generate(messages, target, conv)
+        if decision is None:
             return
-        log.debug("[%s] llm raw: %r", target, raw)
-        decision = parse_reply(raw, self.irc.nick, self.cfg.bot.max_reply_chars)
+        if decision.text and self._is_repeat(key, decision.text):
+            decision = await self._retry_repeat(messages, decision, key, target, conv)
+            if decision is None:
+                return
         if self.memory:
             speaker = next((e.nick for e in reversed(self.history.entries(key)) if not e.is_bot), "?")
             for fact in decision.memories:

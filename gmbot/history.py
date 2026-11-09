@@ -52,6 +52,9 @@ class History:
     def add(self, target: str, entry: Entry) -> None:
         self._logs.setdefault(target, deque(maxlen=self.max_entries)).append(entry)
 
+    def clear(self, target: str) -> None:
+        self._logs.pop(target, None)
+
     def entries(self, target: str) -> list[Entry]:
         return list(self._logs.get(target, ()))
 

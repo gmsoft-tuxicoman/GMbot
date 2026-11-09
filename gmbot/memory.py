@@ -35,6 +35,26 @@ class Memory:
         self._load()
         return "\n".join(self._lines)
 
+    @property
+    def facts(self) -> list[str]:
+        self._load()
+        return [ln[2:] for ln in self._lines]
+
+    def forget(self, pattern: str) -> int:
+        """Remove facts containing pattern (case-insensitive); returns how many were removed."""
+        self._load()
+        pattern = pattern.lower()
+        kept = [ln for ln in self._lines if pattern not in ln.lower()]
+        removed = len(self._lines) - len(kept)
+        if removed:
+            self._lines = kept
+            self._save()
+        return removed
+
+    def _save(self) -> None:
+        self.path.write_text(HEADER + "\n".join(self._lines) + ("\n" if self._lines else ""), encoding="utf-8")
+        self._mtime = self.path.stat().st_mtime
+
     def add(self, fact: str, nick: str, where: str) -> bool:
         """Append a fact; returns False if it was empty or already known."""
         fact = " ".join(fact.split()).strip(" .")
@@ -47,7 +67,6 @@ class Memory:
         self._lines.append(f"- {fact} ({nick}, {where}, {time.strftime('%Y-%m-%d', time.gmtime())})")
         if len(self._lines) > self.max_facts:
             self._lines = self._lines[-self.max_facts :]
-        self.path.write_text(HEADER + "\n".join(self._lines) + "\n", encoding="utf-8")
-        self._mtime = self.path.stat().st_mtime
+        self._save()
         log.info("remembered: %s", fact)
         return True

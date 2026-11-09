@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 
 from .history import END, SKIP
@@ -38,6 +39,20 @@ def parse_reply(raw: str, nick: str, max_chars: int) -> Decision:
         cut = line[:max_chars]
         line = (cut.rsplit(" ", 1)[0] if " " in cut else cut).rstrip(",;:")
     return Decision(text=line or None, end=end, memories=memories)
+
+
+def _normalize(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+def is_repeat(text: str, previous: list[str], threshold: float) -> bool:
+    """True if text is (nearly) the same as one of the previous lines, ignoring case and punctuation."""
+    norm = _normalize(text)
+    for prev in previous:
+        other = _normalize(prev)
+        if norm == other or (threshold < 1 and SequenceMatcher(None, norm, other).ratio() >= threshold):
+            return True
+    return False
 
 
 class Conversation:

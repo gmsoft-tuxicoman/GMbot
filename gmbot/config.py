@@ -51,6 +51,12 @@ class BotConfig:
     conversation_timeout: float = 600.0
     debounce_seconds: float = 2.0
     max_reply_chars: int = 300
+    private_messages: bool = False  # answer private messages (owner commands always work)
+    repeat_check_lines: int = 5  # compare each reply with the bot's last N lines here (0 = off)
+    repeat_similarity: float = 0.9  # 1.0 = exact repeats only (ignoring case/punctuation)
+    command_prefix: str = "."
+    owner_account: str = ""  # services account allowed to run commands; defaults to irc.owner
+    owner_require_account: bool = True  # also check the account, not just the (spoofable) nick
     memory_enabled: bool = True
     memory_file: str = "MEMORY.md"
     memory_max_facts: int = 200

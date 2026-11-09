@@ -84,10 +84,49 @@ Each channel (and private chat) has two states:
   - `[END]`: the conversation is over, go back to idle (a last line before it is allowed: `cya [END]`)
 
 The bot also goes idle after `conversation_timeout` seconds without being mentioned or replying.
-Private messages always get an answer.
+Private messages are only answered if `private_messages = true` (off by default, toggle with `.pm`);
+owner commands work in private either way.
 
 Whatever the model produces, only the first line is sent, the bot's own nick echoed at the start is
 removed, and the line is cut to `max_reply_chars` at a word boundary.
+
+If a reply is the same as (or very close to) one of the bot's last `repeat_check_lines` lines in that
+channel, the model is asked once more for something different. If it repeats itself again, the bot
+says nothing.
+
+## Owner commands
+
+The owner (`irc.owner`) can control the bot with commands, in a channel or by private message.
+They are handled directly in Python: never sent to the LLM, never stored in the history. Answers
+come back to you as NOTICEs.
+
+| command | effect |
+|---|---|
+| `.help` | list commands |
+| `.join #channel [key]` | join a channel |
+| `.part [#channel] [reason]` | leave a channel (default: the one you typed in) |
+| `.quit [message]` | send QUIT and stop the bot |
+| `.nick newnick` | change nick |
+| `.say [#channel\|nick] text` | make the bot say something |
+| `.act [#channel\|nick] text` | make the bot do a `/me` |
+| `.thinking [off\|low\|mid\|high]` | show or set `reasoning_effort` |
+| `.pm [on\|off]` | show or set whether the bot answers private messages |
+| `.model [name]` | show or set the LLM model |
+| `.mute [#channel]` / `.unmute [#channel]` | stop / resume answering in a channel |
+| `.stop [#channel]` | end the current conversation and go idle (history kept) |
+| `.reset [#channel]` | clear that channel's conversation history and go idle |
+| `.remember fact` | add a fact to memory |
+| `.forget text` | remove memory facts containing `text` |
+| `.memory [n]` | show the number of facts and the last `n` (default 5) |
+| `.status` | channels, model, thinking level, active conversations, muted channels |
+
+Changes made by commands last until restart; `config.toml` isn't modified (`.join`/`.part` are
+kept across reconnects though).
+
+A nick alone can be taken by anyone while you're offline, so by default the bot also checks the
+NickServ account the message came from (IRCv3 `account-tag`, supported by Libera): you must be
+identified as `owner_account` (defaults to `owner`). Set `owner_require_account = false` to match the
+nick only. Messages from anyone else that look like commands are treated as normal chat.
 
 ## Persona: INSTRUCTIONS.md
 
@@ -170,6 +209,12 @@ chat_template_kwargs = { enable_thinking = false }   # llama.cpp / vLLM, Qwen3-s
 | `conversation_timeout` | `600` | seconds without involvement before going idle |
 | `debounce_seconds` | `2` | wait for people to finish typing |
 | `max_reply_chars` | `300` | maximum reply length |
+| `private_messages` | `false` | answer private messages (owner commands always work) |
+| `repeat_check_lines` | `5` | don't repeat any of the bot's last N lines (0 = off) |
+| `repeat_similarity` | `0.9` | similarity counted as a repeat (1.0 = identical, ignoring case/punctuation) |
+| `command_prefix` | `"."` | prefix for owner commands |
+| `owner_account` | `""` | NickServ account allowed to run commands (`""` = `irc.owner`) |
+| `owner_require_account` | `true` | require that account, not just the nick |
 | `memory_enabled` | `true` | enable `[REMEMBER: ...]` memory |
 | `memory_file` | `"MEMORY.md"` | memory file |
 | `memory_max_facts` | `200` | maximum number of stored facts |
@@ -196,6 +241,7 @@ gmbot/
   history.py        message history, system prompt and context building
   conversation.py   idle/active state, parsing [SKIP]/[END]/[REMEMBER]
   memory.py         MEMORY.md handling
+  commands.py       owner commands (.join, .part, .thinking, ...)
   bot.py            ties it all together
 tests/              pytest suite
 INSTRUCTIONS.md     default persona

@@ -3,3 +3,5 @@ __pycache__/
 config.toml
 MEMORY.md
 .pytest_cache/
+INSTRUCTIONS-GM.md
+*.swp

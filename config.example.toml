@@ -39,6 +39,12 @@ context_messages = 512        # previous messages kept and sent to the LLM
 conversation_timeout = 600    # go idle after this many seconds without being mentioned or replying
 debounce_seconds = 2          # wait for people to finish typing before replying
 max_reply_chars = 300
+private_messages = false      # answer private messages; owner commands work in PM either way (.pm on|off)
+repeat_check_lines = 5        # don't repeat any of the bot's last N lines (0 = off)
+repeat_similarity = 0.9       # how similar counts as a repeat; 1.0 = identical only (case/punctuation ignored)
+command_prefix = "."          # owner commands: .help, .join, .part, .thinking, .quit, ...
+owner_account = ""            # NickServ account allowed to run commands; "" = same as irc.owner
+owner_require_account = true  # also check the account (nick alone can be taken by anyone)
 memory_enabled = true         # let the bot store facts it's told ([REMEMBER: ...]) in memory_file
 memory_file = "MEMORY.md"     # included in the system prompt; edit it freely, reloaded on change
 memory_max_facts = 200        # oldest facts are dropped beyond this

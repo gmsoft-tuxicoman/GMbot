@@ -89,7 +89,8 @@ def is_channel(target: str) -> bool:
     return target[:1] in "#&+!"
 
 
-MessageHandler = Callable[[str, str, str, bool], Awaitable[None]]
+# (nick, target, text, is_action, account): account is the sender's services account, if known.
+MessageHandler = Callable[[str, str, str, bool, str | None], Awaitable[None]]
 
 
 class IRCClient:
@@ -98,7 +99,9 @@ class IRCClient:
         self.ctcp_version = ctcp_version
         self.nick = cfg.nick
         self.members: dict[str, set[str]] = {}
-        self.on_message: MessageHandler | None = None  # (nick, target, text, is_action)
+        self.on_message: MessageHandler | None = None
+        self.channels: list[str] = list(cfg.channels)  # joined on (re)connect; .join/.part update it
+        self.has_account_tag = False
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._queue: asyncio.Queue[str] = asyncio.Queue()
@@ -147,6 +150,26 @@ class IRCClient:
         self._queue.put_nowait(f"PRIVMSG {target} :{text}")
         return text
 
+    def notice(self, target: str, text: str) -> None:
+        overhead = len(f"NOTICE {target} :".encode()) + PREFIX_RESERVE + 2
+        text = truncate_utf8(text.replace("\r", " ").replace("\n", " "), MAX_LINE - overhead)
+        self._queue.put_nowait(f"NOTICE {target} :{text}")
+
+    def action(self, target: str, text: str) -> None:
+        self.privmsg(target, f"\x01ACTION {text}\x01")
+
+    def join(self, channel: str, key: str = "") -> None:
+        if irc_lower(channel) not in map(irc_lower, self.channels):
+            self.channels.append(channel)
+        self._queue.put_nowait(f"JOIN {channel} {key}".rstrip())
+
+    def part(self, channel: str, reason: str = "") -> None:
+        self.channels = [c for c in self.channels if irc_lower(c) != irc_lower(channel)]
+        self._queue.put_nowait(f"PART {channel} :{reason}" if reason else f"PART {channel}")
+
+    def change_nick(self, nick: str) -> None:
+        self._queue.put_nowait(f"NICK {nick}")
+
     def channel_members(self, channel: str) -> list[str]:
         return sorted(self.members.get(irc_lower(channel), ()), key=str.lower)
 
@@ -162,6 +185,7 @@ class IRCClient:
         self.members.clear()
         self._registered = False
         self._caps = set()
+        self.has_account_tag = False
         self._last_recv = time.monotonic()
         self._queue = asyncio.Queue()
         self._session_done.clear()
@@ -264,7 +288,7 @@ class IRCClient:
             # +B can't be changed while in channels, so it has to go out before the JOINs.
             if self.cfg.bot_mode:
                 await self._send_now(f"MODE {self.nick} +B")
-            for chan in self.cfg.channels:
+            for chan in self.channels:
                 await self._send_now(f"JOIN {chan}")
         elif cmd == "433" and not self._registered:
             self.nick += "_"
@@ -294,7 +318,7 @@ class IRCClient:
                 if self._discard(names, old):
                     names.add(new)
         elif cmd == "PRIVMSG" and len(p) >= 2:
-            await self._handle_privmsg(msg.nick, p[0], p[1])
+            await self._handle_privmsg(msg.nick, p[0], p[1], msg.tags.get("account"))
         elif cmd == "ERROR":
             raise ConnectionError(f"server error: {p[-1] if p else ''}")
 
@@ -308,20 +332,35 @@ class IRCClient:
             self._caps.update(c.split("=", 1)[0] for c in caps.split())
             if not final:
                 return
-            if "sasl" in self._caps and self.cfg.sasl_password:
-                await self._send_now("CAP REQ :sasl")
-            elif self.cfg.sasl_required:
+            use_sasl = "sasl" in self._caps and bool(self.cfg.sasl_password)
+            if not use_sasl and self.cfg.sasl_required:
                 raise SASLError("SASL required but not available or no password configured")
+            # account-tag tells us which account sent each message (used to verify the owner).
+            want = [c for c in ("account-tag",) if c in self._caps] + (["sasl"] if use_sasl else [])
+            if want:
+                await self._send_now(f"CAP REQ :{' '.join(want)}")
             else:
                 await self._send_now("CAP END")
-        elif sub == "ACK" and "sasl" in p[-1].split():
-            await self._send_now("AUTHENTICATE PLAIN")
+        elif sub == "ACK":
+            acked = p[-1].split()
+            if "account-tag" in acked:
+                self.has_account_tag = True
+            if "sasl" in acked:
+                await self._send_now("AUTHENTICATE PLAIN")
+            else:
+                await self._send_now("CAP END")
         elif sub == "NAK":
-            if self.cfg.sasl_required:
+            rejected = p[-1].split()
+            if "account-tag" in rejected and len(rejected) > 1:
+                # The whole request is refused at once; retry with SASL alone.
+                self._caps.discard("account-tag")
+                await self._send_now("CAP REQ :sasl")
+            elif self.cfg.sasl_required:
                 raise SASLError("server refused SASL capability")
-            await self._send_now("CAP END")
+            else:
+                await self._send_now("CAP END")
 
-    async def _handle_privmsg(self, nick: str, target: str, text: str) -> None:
+    async def _handle_privmsg(self, nick: str, target: str, text: str, account: str | None) -> None:
         reply_to = target if is_channel(target) else nick
         is_action = False
         if text.startswith("\x01"):
@@ -339,7 +378,7 @@ class IRCClient:
                     self._ctcp_reply(nick, "TIME " + time.strftime("%a %b %d %H:%M:%S %Y"))
                 return
         if self.on_message:
-            await self.on_message(nick, reply_to, text, is_action)
+            await self.on_message(nick, reply_to, text, is_action, account)
 
     def _ctcp_reply(self, nick: str, body: str) -> None:
         self._queue.put_nowait(f"NOTICE {nick} :\x01{body}\x01")
