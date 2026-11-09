@@ -1,0 +1,44 @@
+[irc]
+server = "irc.libera.chat"
+port = 6697
+tls = true
+nick = "GMbot"
+username = "gmbot"
+owner = "yournick"            # your Libera nick, so people know who runs the bot (Libera policy)
+description = "LLM chat bot"  # realname/gecos becomes "LLM chat bot | owner: yournick" (shown in /whois)
+# realname = ""               # set to override the generated realname completely
+bot_mode = true               # set user mode +B (marks the client as a bot in /whois and message tags)
+quit_message = "bye for now"  # sent on Ctrl+C / SIGTERM
+channels = ["##gmbot-test"]
+sasl_username = "GMbot"       # your NickServ account name
+# sasl_password = ""          # better: set env GMBOT_SASL_PASSWORD
+sasl_required = true          # refuse to connect if SASL fails
+
+[llm]
+base_url = "http://localhost:8080/v1"   # any OpenAI-compatible endpoint
+model = "local-model"
+# api_key = ""                # or env GMBOT_LLM_API_KEY; optional for local servers
+temperature = 0.8
+max_tokens = 1024             # includes thinking tokens, so leave headroom for reasoning models
+reasoning_effort = "low"      # how hard the model thinks: "low", "medium", "high"; "" = don't send it
+context_budget_tokens = 16000 # approximate prompt budget; oldest messages are dropped beyond it
+timeout = 120
+
+# Extra fields merged into every request, for server-specific options. Examples:
+#   [llm.extra_body]
+#   chat_template_kwargs = { enable_thinking = false }   # llama.cpp / vLLM with Qwen3-style templates
+#   chat_template_kwargs = { reasoning_effort = "low" }  # llama.cpp with gpt-oss
+#   think = false                                        # Ollama native API
+
+[bot]
+instructions_file = "INSTRUCTIONS.md"
+ctcp_version = "GMbot 0.1 (Python asyncio IRC bot)"
+aliases = []                  # other names that wake the bot up, e.g. ["gm", "bot"]
+ignore = ["ChanServ", "NickServ"]
+context_messages = 512        # previous messages kept and sent to the LLM
+conversation_timeout = 600    # go idle after this many seconds without being mentioned or replying
+debounce_seconds = 2          # wait for people to finish typing before replying
+max_reply_chars = 300
+memory_enabled = true         # let the bot store facts it's told ([REMEMBER: ...]) in memory_file
+memory_file = "MEMORY.md"     # included in the system prompt; edit it freely, reloaded on change
+memory_max_facts = 200        # oldest facts are dropped beyond this
