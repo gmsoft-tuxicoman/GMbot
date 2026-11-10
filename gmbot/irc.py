@@ -164,8 +164,12 @@ class IRCClient:
         text = truncate_utf8(text.replace("\r", " ").replace("\n", " "), MAX_LINE - overhead)
         self._queue.put_nowait(f"NOTICE {target} :{text}")
 
-    def action(self, target: str, text: str) -> None:
-        self.privmsg(target, f"\x01ACTION {text}\x01")
+    def action(self, target: str, text: str) -> str:
+        """Queue a CTCP ACTION (/me); returns the (possibly truncated) text that will be sent."""
+        overhead = len(f"PRIVMSG {target} :\x01ACTION \x01".encode()) + PREFIX_RESERVE + 2
+        text = truncate_utf8(text.replace("\r", " ").replace("\n", " "), MAX_LINE - overhead)
+        self._queue.put_nowait(f"PRIVMSG {target} :\x01ACTION {text}\x01")
+        return text
 
     def join(self, channel: str, key: str = "") -> None:
         if irc_lower(channel) not in map(irc_lower, self.channels):

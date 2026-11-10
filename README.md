@@ -92,9 +92,12 @@ with several lines, each line is sent as its own message (empty lines and code f
 the bot's own nick echoed at the start is removed). Lines longer than `max_reply_chars` are split at
 word boundaries into several messages, so nothing is lost. Flood control paces the messages.
 
-If a reply is the same as (or very close to) one of the bot's last `repeat_check_lines` lines in that
-channel, the model is asked once more for something different. If it repeats itself again, the bot
-says nothing.
+The model can also do IRC actions: a reply line starting with `/me ` (e.g. `/me slaps alice around a
+bit with a large trout`) is sent as a CTCP ACTION, like `/me` in irssi. Its own past actions are shown
+back to it in the same `/me` form.
+
+Lines that are the same as (or very close to) one of the bot's last `repeat_check_lines` lines in
+that channel are dropped; if nothing new is left, the bot says nothing that turn (no retry).
 
 ## Owner commands
 
@@ -145,7 +148,7 @@ current nick, so the persona follows `.nick` changes. To keep a personal persona
 needs a restart.
 
 The bot appends its own rules after it (`gmbot/history.py`): one short casual line, the `[SKIP]` /
-`[END]` / `[REMEMBER]` control words, the current time and the list of people in the channel.
+`[END]` / `[REMEMBER]` / `[FORGET]` control words, the current time and the list of people in the channel.
 
 ## Memory: MEMORY.md
 
@@ -155,6 +158,11 @@ its reply. The bot strips it from the message and adds the fact to `memory_file`
 ```
 - alice runs gentoo on her laptop (alice, #linuxbe, 2026-11-09)
 ```
+
+To remove something (someone asks it to forget, or a fact turned out wrong), the model appends
+`[FORGET: the fact]`. Each tag removes at most one fact: the closest match, and only if it's at least
+80% similar, so a vague request can't wipe the memory. "Forget old + remember new" updates a fact.
+The owner command `.forget text` removes every fact containing `text`.
 
 The whole file is included in every prompt. Exact duplicates are ignored, and beyond
 `memory_max_facts` the oldest facts are dropped. You can edit or prune it by hand while the bot runs;
@@ -247,7 +255,7 @@ gmbot/
   irc.py            IRC client: TLS, SASL, CTCP, flood control, reconnect, QUIT
   llm.py            OpenAI-compatible client
   history.py        message history, system prompt and context building
-  conversation.py   idle/active state, parsing [SKIP]/[END]/[REMEMBER]
+  conversation.py   idle/active state, parsing [SKIP]/[END]/[REMEMBER]/[FORGET]
   memory.py         MEMORY.md handling
   commands.py       owner commands (.join, .part, .thinking, ...)
   bot.py            ties it all together

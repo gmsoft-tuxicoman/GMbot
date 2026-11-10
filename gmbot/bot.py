@@ -8,7 +8,7 @@ import signal
 
 from .commands import Commands
 from .config import Config
-from .conversation import Conversation, Decision, is_repeat, mentions, parse_reply
+from .conversation import ACTION_PREFIX, Conversation, Decision, is_repeat, mentions, parse_reply
 from .history import Entry, History, Instructions, build_messages, system_prompt
 from .irc import IRCClient, irc_lower, is_channel, strip_formatting
 from .llm import LLMClient
@@ -71,10 +71,7 @@ class Bot:
 
     def say(self, target: str, text: str, action: bool = False) -> None:
         """Send a line as the bot (from an owner command) and record it in the history."""
-        if action:
-            self.irc.action(target, text)
-        else:
-            text = self.irc.privmsg(target, text)
+        text = self.irc.action(target, text) if action else self.irc.privmsg(target, text)
         self.history.add(irc_lower(target), Entry(nick=self.irc.nick, text=text, is_bot=True, is_action=action))
 
     def _conv(self, key: str) -> Conversation:
@@ -160,35 +157,13 @@ class Bot:
         n = self.cfg.bot.repeat_check_lines
         if n <= 0:
             return lines
-        seen = [e.text for e in self.history.entries(key) if e.is_bot][-n:]
+        seen = [ACTION_PREFIX + e.text if e.is_action else e.text for e in self.history.entries(key) if e.is_bot][-n:]
         kept = []
         for line in lines:
             if not is_repeat(line, seen, self.cfg.bot.repeat_similarity):
                 kept.append(line)
                 seen.append(line)
         return kept
-
-    async def _retry_repeat(
-        self, messages: list[dict], first: Decision, key: str, target: str, conv: Conversation
-    ) -> Decision | None:
-        """The model repeated itself: ask once for something new, and stay quiet if it repeats again."""
-        log.info("[%s] reply repeats an earlier line, retrying: %s", target, first.text)
-        retry = messages + [
-            {"role": "assistant", "content": first.text},
-            {
-                "role": "user",
-                "content": "(note from the system, not a chat message: you already said that. don't repeat "
-                "yourself. say something different, or output [SKIP] or [END])",
-            },
-        ]
-        second = await self._generate(retry, target, conv)
-        if second is None and not conv.active:
-            return None
-        memories = first.memories + (second.memories if second else [])
-        if second and (lines := self._new_lines(key, second.lines)):
-            return Decision(lines, second.end, memories)
-        log.info("[%s] still repeating, staying quiet", target)
-        return Decision([], first.end or bool(second and second.end), memories)
 
     async def _respond(self, key: str, target: str, conv: Conversation) -> None:
         where = target if is_channel(target) else f"a private chat with {target}"
@@ -207,22 +182,26 @@ class Bot:
         if decision is None:
             return
         if decision.lines:
-            if lines := self._new_lines(key, decision.lines):
-                if len(lines) < len(decision.lines):
-                    log.info("[%s] dropped %d repeated line(s)", target, len(decision.lines) - len(lines))
-                decision.lines = lines
-            else:
-                decision = await self._retry_repeat(messages, decision, key, target, conv)
-                if decision is None:
-                    return
+            # Repeated lines are dropped, not retried; if nothing new is left the bot stays quiet.
+            lines = self._new_lines(key, decision.lines)
+            if len(lines) < len(decision.lines):
+                log.info("[%s] dropped %d repeated line(s)", target, len(decision.lines) - len(lines))
+            decision.lines = lines
         if self.memory:
             speaker = next((e.nick for e in reversed(self.history.entries(key)) if not e.is_bot), "?")
+            for fact in decision.forgets:  # before remembering, so "forget old + remember new" updates
+                self.memory.forget_fact(fact)
             for fact in decision.memories:
                 self.memory.add(fact, speaker, target if is_channel(target) else "pm")
         for line in decision.lines:
-            sent = self.irc.privmsg(target, line)
-            self.history.add(key, Entry(nick=self.irc.nick, text=sent, is_bot=True))
-            log.info("[%s] <%s> %s", target, self.irc.nick, sent)
+            if line.startswith(ACTION_PREFIX):
+                sent = self.irc.action(target, line[len(ACTION_PREFIX) :])
+                self.history.add(key, Entry(nick=self.irc.nick, text=sent, is_bot=True, is_action=True))
+                log.info("[%s] * %s %s", target, self.irc.nick, sent)
+            else:
+                sent = self.irc.privmsg(target, line)
+                self.history.add(key, Entry(nick=self.irc.nick, text=sent, is_bot=True))
+                log.info("[%s] <%s> %s", target, self.irc.nick, sent)
         if decision.lines:
             conv.touch()
         elif not decision.end:

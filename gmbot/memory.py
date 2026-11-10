@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# How close a [FORGET: ...] must be to a stored fact for that fact to be removed.
+FORGET_SIMILARITY = 0.8
+
+
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+def _fact_text(line: str) -> str:
+    """'- fact (nick, #chan, date)' -> 'fact'"""
+    return re.sub(r"\s*\([^()]*\)\s*$", "", line[2:])
+
 
 HEADER = "# memory\n\nfacts the bot learned in conversations. edit freely, one fact per line.\n\n"
 
@@ -49,6 +64,25 @@ class Memory:
         if removed:
             self._lines = kept
             self._save()
+        return removed
+
+    def forget_fact(self, text: str) -> str | None:
+        """Remove the single fact best matching text, if it's close enough; returns the removed fact."""
+        self._load()
+        wanted = _norm(_fact_text("- " + text))
+        if not wanted:
+            return None
+        best, best_score = None, 0.0
+        for i, line in enumerate(self._lines):
+            score = SequenceMatcher(None, wanted, _norm(_fact_text(line))).ratio()
+            if score > best_score:
+                best, best_score = i, score
+        if best is None or best_score < FORGET_SIMILARITY:
+            log.info("nothing close enough to forget for: %s", text)
+            return None
+        removed = self._lines.pop(best)[2:]
+        self._save()
+        log.info("forgot: %s", removed)
         return removed
 
     def _save(self) -> None:

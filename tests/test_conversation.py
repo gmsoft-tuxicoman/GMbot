@@ -56,6 +56,7 @@ class FakeIRC:
 
     def action(self, target, text):
         self.sent.append(("action", target, text))
+        return text
 
     def join(self, channel, key=""):
         self.sent.append(("join", channel))
@@ -188,21 +189,15 @@ def test_is_repeat():
 
 
 @pytest.mark.asyncio
-async def test_repeat_triggers_retry(tmp_path):
+async def test_repeat_is_ignored_without_retry(tmp_path):
     bot = make_bot(tmp_path, ["use the lts kernel", "use the lts kernel!", "or try 6.12 maybe"])
     await say(bot, "alice", "GMbot which kernel?")
     await say(bot, "alice", "hmm?")
-    assert bot.irc.sent == [("#c", "use the lts kernel"), ("#c", "or try 6.12 maybe")]
-    assert "already said that" in bot.llm.calls[-1][-1]["content"]
-
-
-@pytest.mark.asyncio
-async def test_repeat_twice_stays_quiet(tmp_path):
-    bot = make_bot(tmp_path, ["use the lts kernel", "use the lts kernel", "Use the LTS kernel."])
-    await say(bot, "alice", "GMbot which kernel?")
-    await say(bot, "alice", "hmm?")
     assert bot.irc.sent == [("#c", "use the lts kernel")]
+    assert len(bot.llm.calls) == 2  # no retry
     assert bot.convs["#c"].active
+    await say(bot, "alice", "other ideas?")
+    assert bot.irc.sent[-1] == ("#c", "or try 6.12 maybe")
 
 
 @pytest.mark.asyncio
@@ -212,3 +207,69 @@ async def test_multiline_reply_sent_line_by_line(tmp_path):
     # each line is its own message; a line repeating an earlier one in the same reply is dropped
     assert bot.irc.sent == [("#c", "first do this"), ("#c", "then that")]
     assert [e.text for e in bot.history.entries("#c") if e.is_bot] == ["first do this", "then that"]
+
+
+def test_parse_reply_actions():
+    d = parse_reply("/me slaps alice with a trout\nlol\n* GMbot hides", "GMbot", 300)
+    assert d.lines == ["/me slaps alice with a trout", "lol", "/me hides"]
+    # long actions stay actions when wrapped
+    d = parse_reply("/me " + "waves " * 20, "GMbot", 30)
+    assert len(d.lines) > 1 and all(ln.startswith("/me ") for ln in d.lines)
+
+
+@pytest.mark.asyncio
+async def test_action_reply_sent_as_ctcp_action(tmp_path):
+    bot = make_bot(tmp_path, ["/me slaps alice\nthat's for the bad pun", "ok"])
+    await say(bot, "alice", "GMbot knock knock")
+    assert bot.irc.sent == [("action", "#c", "slaps alice"), ("#c", "that's for the bad pun")]
+    entry = bot.history.entries("#c")[-2]
+    assert entry.is_bot and entry.is_action
+    await say(bot, "alice", "ouch")
+    # the model sees its own action in the same /me form it writes
+    assert bot.llm.calls[-1][-2] == {"role": "assistant", "content": "/me slaps alice\nthat's for the bad pun"}
+
+
+def test_irc_action_framing():
+    from gmbot.config import IRCConfig
+    from gmbot.irc import IRCClient
+
+    irc = IRCClient(IRCConfig(), "v")
+    assert irc.action("#c", "waves" + "x" * 600).startswith("waves")
+    line = irc._queue.get_nowait()
+    assert line.startswith("PRIVMSG #c :\x01ACTION waves") and line.endswith("\x01")
+    assert len(line.encode()) <= 512 - 100
+
+
+@pytest.mark.asyncio
+async def test_repeated_action_is_caught(tmp_path):
+    bot = make_bot(tmp_path, ["/me slaps alice", "/me slaps alice", "/me slaps alice"])
+    await say(bot, "alice", "GMbot hi")
+    await say(bot, "alice", "again")
+    assert bot.irc.sent == [("action", "#c", "slaps alice")]
+
+
+def test_parse_reply_forget():
+    d = parse_reply("ok done [FORGET: alice runs gentoo] [REMEMBER: alice runs arch]", "GMbot", 300)
+    assert d.lines == ["ok done"] and d.forgets == ["alice runs gentoo"] and d.memories == ["alice runs arch"]
+
+
+def test_memory_forget_fact(tmp_path):
+    from gmbot.memory import Memory
+
+    m = Memory(tmp_path / "MEMORY.md", max_facts=10)
+    m.add("alice runs gentoo on her laptop", "alice", "#c")
+    m.add("bob likes rust", "bob", "#c")
+    # copied with attribution and different punctuation/case: still matched
+    assert m.forget_fact("Alice runs Gentoo on her laptop. (alice, #c, 2026-11-10)").startswith("alice runs gentoo")
+    # vague or unrelated text removes nothing
+    assert m.forget_fact("a") is None and m.forget_fact("everything") is None
+    assert [f.split(" (")[0] for f in m.facts] == ["bob likes rust"]
+
+
+@pytest.mark.asyncio
+async def test_forget_then_remember_updates(tmp_path):
+    bot = make_bot(tmp_path, ["noted [REMEMBER: alice runs gentoo]", "ah ok [FORGET: alice runs gentoo] [REMEMBER: alice runs arch now]"])
+    await say(bot, "alice", "GMbot i run gentoo")
+    await say(bot, "alice", "actually i switched to arch")
+    assert [f.split(" (")[0] for f in bot.memory.facts] == ["alice runs arch now"]
+    assert bot.irc.sent[-1] == ("#c", "ah ok")

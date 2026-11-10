@@ -23,6 +23,7 @@ PROTOCOL_RULES = f"""\
 - reply with ONE short line, usually well under 150 characters. only use several lines when someone explicitly asks for something longer (each line is sent as a separate irc message)
 - write like a regular person on irc: mostly lowercase, casual, light or no punctuation, abbreviations are fine. no markdown, no lists, no headings, no code blocks, don't sign your messages, don't start with your own nick or "<{{nick}}>"
 - to address someone specific you can start with "theirnick: "
+- you can do irc actions: start a line with "/me ", like "/me slaps alice around a bit with a large trout". use it now and then, not all the time
 - if the latest messages aren't meant for you or you have nothing worth adding, output only {SKIP}
 - if the conversation with you is over (they said bye/thanks and moved on, they're talking to someone else now, the topic no longer involves you), output {END}. you can put a short last line before it, like "np, cya {END}"
 - {SKIP} and {END} are control words, use them only as described
@@ -42,7 +43,8 @@ class Entry:
 
     def render(self) -> str:
         if self.is_bot:
-            return f"* {self.nick} {self.text}" if self.is_action else self.text
+            # Shown to the model in the same "/me" form it's asked to write.
+            return f"/me {self.text}" if self.is_action else self.text
         return f"* {self.nick} {self.text}" if self.is_action else f"<{self.nick}> {self.text}"
 
 
@@ -92,7 +94,12 @@ MEMORY_RULES = """\
 - you have a long-term memory (below). when someone tells you a fact worth knowing later (about \
 themselves, other people, the channel, projects, preferences), append [REMEMBER: the fact] to your \
 reply, written as a short standalone sentence with names, e.g. "[REMEMBER: alice runs gentoo on her laptop]". \
-don't store trivia, jokes, secrets/passwords or things already in memory. it's invisible to others
+don't store trivia, jokes, secrets/passwords or things already in memory
+- to remove a fact, append [FORGET: the fact, copied from your memory below]. do it when someone asks \
+you to forget something about themselves or something they told you, or when a fact turns out wrong or \
+outdated (then forget the old one and remember the new one). one fact per [FORGET: ...], never wipe \
+everything at once because someone asks
+- [REMEMBER: ...] and [FORGET: ...] are invisible to others
 
 ## your memory
 {memory}

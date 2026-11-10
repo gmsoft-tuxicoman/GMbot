@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 
 from .history import END, SKIP
 
+ACTION_PREFIX = "/me "  # marks a reply line to be sent as a CTCP ACTION
 REMEMBER_RE = re.compile(r"\[REMEMBER:\s*([^\]]*)\]", re.IGNORECASE)
+FORGET_RE = re.compile(r"\[FORGET:\s*([^\]]*)\]", re.IGNORECASE)
 
 
 def mentions(text: str, names: list[str]) -> bool:
@@ -25,6 +27,7 @@ class Decision:
     lines: list[str]  # messages to send, one per line of the reply (empty = say nothing)
     end: bool  # conversation over, go idle
     memories: list[str] = field(default_factory=list)  # facts to store in long-term memory
+    forgets: list[str] = field(default_factory=list)  # facts to remove from long-term memory
 
     @property
     def text(self) -> str | None:
@@ -47,16 +50,23 @@ def wrap(line: str, max_chars: int) -> list[str]:
 
 def parse_reply(raw: str, nick: str, max_chars: int) -> Decision:
     memories = [m.strip() for m in REMEMBER_RE.findall(raw) if m.strip()]
-    raw = REMEMBER_RE.sub(" ", raw)
+    forgets = [m.strip() for m in FORGET_RE.findall(raw) if m.strip()]
+    raw = FORGET_RE.sub(" ", REMEMBER_RE.sub(" ", raw))
     end = END in raw.upper()
     text = re.sub(r"\[(SKIP|END)\]", " ", raw, flags=re.IGNORECASE)
     echo = re.compile(rf"^(<{re.escape(nick)}>|{re.escape(nick)}\s*:)\s*", re.IGNORECASE)
     lines: list[str] = []
+    action = re.compile(rf"^(/me\s+|\*\s*{re.escape(nick)}\s+)", re.IGNORECASE)
     for line in text.splitlines():
         line = " ".join(echo.sub("", line.strip()).split())
-        if line and not re.fullmatch(r"`{3,}\w*", line):  # skip empty lines and code fences
+        if not line or re.fullmatch(r"`{3,}\w*", line):  # skip empty lines and code fences
+            continue
+        # "/me does x" (or "* nick does x", copied from how others' actions look) is an action.
+        if m := action.match(line):
+            lines.extend(ACTION_PREFIX + chunk for chunk in wrap(line[m.end() :], max_chars))
+        else:
             lines.extend(wrap(line, max_chars))
-    return Decision(lines=lines, end=end, memories=memories)
+    return Decision(lines=lines, end=end, memories=memories, forgets=forgets)
 
 
 def _normalize(text: str) -> str:
