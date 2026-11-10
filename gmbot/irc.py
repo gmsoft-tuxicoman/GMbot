@@ -91,6 +91,11 @@ def is_channel(target: str) -> bool:
 
 # (nick, target, text, is_action, account): account is the sender's services account, if known.
 MessageHandler = Callable[[str, str, str, bool, str | None], Awaitable[None]]
+# (ok, nick, reason): result of a nick change requested after registration.
+NickResultHandler = Callable[[bool, str, str], None]
+
+# Numerics refusing a nick change: erroneous, in use, banned in a channel, unavailable, too fast.
+NICK_ERRORS = ("432", "433", "435", "437", "438")
 
 
 class IRCClient:
@@ -100,6 +105,10 @@ class IRCClient:
         self.nick = cfg.nick
         self.members: dict[str, set[str]] = {}
         self.on_message: MessageHandler | None = None
+        self.on_nick_result: NickResultHandler | None = None
+        # (old, new, channels shared with the bot) whenever someone else changes nick.
+        self.on_nick_change: Callable[[str, str, list[str]], None] | None = None
+        self.wanted_nick = cfg.nick  # nick to use on (re)connect; updated by successful nick changes
         self.channels: list[str] = list(cfg.channels)  # joined on (re)connect; .join/.part update it
         self.has_account_tag = False
         self._reader: asyncio.StreamReader | None = None
@@ -181,7 +190,7 @@ class IRCClient:
         self._reader, self._writer = await asyncio.open_connection(
             self.cfg.server, self.cfg.port, ssl=ctx, server_hostname=self.cfg.server if ctx else None
         )
-        self.nick = self.cfg.nick
+        self.nick = self.wanted_nick
         self.members.clear()
         self._registered = False
         self._caps = set()
@@ -293,6 +302,11 @@ class IRCClient:
         elif cmd == "433" and not self._registered:
             self.nick += "_"
             await self._send_now(f"NICK {self.nick}")
+        elif cmd in NICK_ERRORS and self._registered:
+            reason = p[-1] if p else cmd
+            log.warning("nick change refused (%s): %s", cmd, " ".join(p[1:]))
+            if self.on_nick_result:
+                self.on_nick_result(False, self.nick, f"{' '.join(p[1:-1])}: {reason}".lstrip(": "))
         elif cmd == "353" and len(p) >= 4:
             names = self.members.setdefault(irc_lower(p[2]), set())
             for name in p[3].split():
@@ -313,10 +327,18 @@ class IRCClient:
         elif cmd == "NICK" and p:
             old, new = msg.nick, p[0]
             if irc_lower(old) == irc_lower(self.nick):
-                self.nick = new
-            for names in self.members.values():
+                self.nick = self.wanted_nick = new
+                log.info("nick is now %s", new)
+                if self.on_nick_result:
+                    self.on_nick_result(True, new, "")
+            shared = []
+            for chan, names in self.members.items():
                 if self._discard(names, old):
                     names.add(new)
+                    shared.append(chan)
+            if irc_lower(old) != irc_lower(self.nick) and irc_lower(new) != irc_lower(self.nick):
+                if self.on_nick_change:
+                    self.on_nick_change(old, new, shared)
         elif cmd == "PRIVMSG" and len(p) >= 2:
             await self._handle_privmsg(msg.nick, p[0], p[1], msg.tags.get("account"))
         elif cmd == "ERROR":

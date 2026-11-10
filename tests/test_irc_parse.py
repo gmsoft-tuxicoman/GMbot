@@ -57,3 +57,32 @@ def test_realname_from_owner(tmp_path):
     assert load_config(p).irc.realname == "llm bot | owner: guy"
     p.write_text('[irc]\nowner = "guy"\nrealname = "custom"\n')
     assert load_config(p).irc.realname == "custom"
+
+
+def test_nick_change_tracking_and_errors():
+    import asyncio
+
+    from gmbot.config import IRCConfig
+    from gmbot.irc import IRCClient
+
+    irc = IRCClient(IRCConfig(nick="GMbot"), "v")
+    irc._registered = True
+    results = []
+    irc.on_nick_result = lambda ok, nick, reason: results.append((ok, nick, reason))
+
+    asyncio.run(irc._handle(parse_line(":srv 433 GMbot taken :Nickname is already in use")))
+    assert irc.nick == "GMbot" and results[-1] == (False, "GMbot", "taken: Nickname is already in use")
+
+    asyncio.run(irc._handle(parse_line(":GMbot!u@h NICK :NewBot")))
+    assert irc.nick == "NewBot" and irc.wanted_nick == "NewBot"  # used on the next reconnect
+    assert results[-1] == (True, "NewBot", "")
+
+    # someone else's nick change doesn't affect ours
+    asyncio.run(irc._handle(parse_line(":alice!a@h NICK :alice2")))
+    assert irc.nick == "NewBot" and len(results) == 2
+
+
+def test_instructions_nick_placeholder():
+    from gmbot.history import system_prompt
+
+    assert system_prompt("you're {nick}", "NewBot", "net", "#c", []).startswith("you're NewBot")

@@ -22,6 +22,7 @@ class Bot:
         self.cfg = cfg
         self.irc = IRCClient(cfg.irc, cfg.bot.ctcp_version)
         self.irc.on_message = self.on_message
+        self.irc.on_nick_change = self.on_nick_change
         self.llm = LLMClient(cfg.llm)
         self.history = History(cfg.bot.context_messages)
         self.instructions = Instructions(cfg.instructions_path)
@@ -81,14 +82,27 @@ class Bot:
             self.convs[key] = Conversation(self.cfg.bot.conversation_timeout)
         return self.convs[key]
 
+    def on_nick_change(self, old: str, new: str, channels: list[str]) -> None:
+        """Record real nick changes so the model learns them from the server, not from claims in chat."""
+        for chan in channels:
+            self.history.add(irc_lower(chan), Entry(nick=old, text=f"is now known as {new}", is_action=True))
+        for key in (irc_lower(old), irc_lower(new)):
+            if key in self.convs or self.history.entries(key):
+                self.history.add(key, Entry(nick=old, text=f"is now known as {new}", is_action=True))
+                break
+
     async def on_message(
         self, nick: str, target: str, text: str, is_action: bool, account: str | None = None
     ) -> None:
         key = irc_lower(target)
         text = strip_formatting(text)
-        if not is_action and self.commands.is_command(text) and self.commands.is_owner(nick, account):
-            # Owner commands are handled here and never reach the history or the LLM.
-            await self.commands.handle(nick, target, text)
+        if not is_action and self.commands.is_command(text):
+            # Commands never reach the history or the LLM: the owner's are run, anyone else's are
+            # dropped so they can't steer the model (e.g. ".nick x" making it call someone x).
+            if self.commands.is_owner(nick, account):
+                await self.commands.handle(nick, target, text)
+            else:
+                log.info("ignoring command from non-owner %s in %s: %s", nick, target, text)
             return
         if not is_channel(target) and not self.cfg.bot.private_messages:
             log.debug("ignoring private message from %s (private_messages is off)", nick)
@@ -141,17 +155,23 @@ class Bot:
         log.debug("[%s] llm raw: %r", target, raw)
         return parse_reply(raw, self.irc.nick, self.cfg.bot.max_reply_chars)
 
-    def _is_repeat(self, key: str, text: str) -> bool:
+    def _new_lines(self, key: str, lines: list[str]) -> list[str]:
+        """Drop lines repeating one of the bot's recent lines (or an earlier line of the same reply)."""
         n = self.cfg.bot.repeat_check_lines
         if n <= 0:
-            return False
-        recent = [e.text for e in self.history.entries(key) if e.is_bot][-n:]
-        return is_repeat(text, recent, self.cfg.bot.repeat_similarity)
+            return lines
+        seen = [e.text for e in self.history.entries(key) if e.is_bot][-n:]
+        kept = []
+        for line in lines:
+            if not is_repeat(line, seen, self.cfg.bot.repeat_similarity):
+                kept.append(line)
+                seen.append(line)
+        return kept
 
     async def _retry_repeat(
         self, messages: list[dict], first: Decision, key: str, target: str, conv: Conversation
     ) -> Decision | None:
-        """The model repeated itself: ask once for something new, and drop the line if it repeats again."""
+        """The model repeated itself: ask once for something new, and stay quiet if it repeats again."""
         log.info("[%s] reply repeats an earlier line, retrying: %s", target, first.text)
         retry = messages + [
             {"role": "assistant", "content": first.text},
@@ -165,16 +185,18 @@ class Bot:
         if second is None and not conv.active:
             return None
         memories = first.memories + (second.memories if second else [])
-        if second and second.text and not self._is_repeat(key, second.text):
-            return Decision(second.text, second.end, memories)
+        if second and (lines := self._new_lines(key, second.lines)):
+            return Decision(lines, second.end, memories)
         log.info("[%s] still repeating, staying quiet", target)
-        return Decision(None, first.end or bool(second and second.end), memories)
+        return Decision([], first.end or bool(second and second.end), memories)
 
     async def _respond(self, key: str, target: str, conv: Conversation) -> None:
         where = target if is_channel(target) else f"a private chat with {target}"
         members = self.irc.channel_members(target) if is_channel(target) else [target, self.irc.nick]
         memory = self.memory.text if self.memory else None
-        system = system_prompt(self.instructions.text, self.irc.nick, self.cfg.irc.server, where, members, memory)
+        system = system_prompt(
+            self.instructions.text, self.irc.nick, self.cfg.irc.server, where, members, memory, self.cfg.irc.owner
+        )
         messages = build_messages(
             system,
             self.history.entries(key),
@@ -184,19 +206,25 @@ class Bot:
         decision = await self._generate(messages, target, conv)
         if decision is None:
             return
-        if decision.text and self._is_repeat(key, decision.text):
-            decision = await self._retry_repeat(messages, decision, key, target, conv)
-            if decision is None:
-                return
+        if decision.lines:
+            if lines := self._new_lines(key, decision.lines):
+                if len(lines) < len(decision.lines):
+                    log.info("[%s] dropped %d repeated line(s)", target, len(decision.lines) - len(lines))
+                decision.lines = lines
+            else:
+                decision = await self._retry_repeat(messages, decision, key, target, conv)
+                if decision is None:
+                    return
         if self.memory:
             speaker = next((e.nick for e in reversed(self.history.entries(key)) if not e.is_bot), "?")
             for fact in decision.memories:
                 self.memory.add(fact, speaker, target if is_channel(target) else "pm")
-        if decision.text:
-            sent = self.irc.privmsg(target, decision.text)
+        for line in decision.lines:
+            sent = self.irc.privmsg(target, line)
             self.history.add(key, Entry(nick=self.irc.nick, text=sent, is_bot=True))
-            conv.touch()
             log.info("[%s] <%s> %s", target, self.irc.nick, sent)
+        if decision.lines:
+            conv.touch()
         elif not decision.end:
             log.info("[%s] skipped", target)
         if decision.end:

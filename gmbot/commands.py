@@ -45,6 +45,8 @@ class Commands:
         owner = bot.cfg.irc.owner
         self.owner_nick = irc_lower(owner)
         self.owner_account = irc_lower(bot.cfg.bot.owner_account or owner)
+        self._nick_requester: Context | None = None
+        bot.irc.on_nick_result = self._nick_result
 
     def is_owner(self, nick: str, account: str | None) -> bool:
         if not self.owner_nick or irc_lower(nick) != self.owner_nick:
@@ -107,7 +109,13 @@ class Commands:
     async def _nick(self, ctx: Context, args: list[str]) -> None:
         if len(args) != 1:
             return self.reply(ctx, f"usage: {self.prefix}nick newnick")
+        self._nick_requester = ctx
         self.bot.irc.change_nick(args[0])
+
+    def _nick_result(self, ok: bool, nick: str, reason: str) -> None:
+        ctx, self._nick_requester = self._nick_requester, None
+        if ctx:
+            self.reply(ctx, f"nick is now {nick}" if ok else f"nick change failed ({reason}), still {nick}")
 
     @command("say", "say [#channel|nick] text - make the bot say something")
     async def _say(self, ctx: Context, args: list[str]) -> None:

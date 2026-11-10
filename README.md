@@ -87,8 +87,10 @@ The bot also goes idle after `conversation_timeout` seconds without being mentio
 Private messages are only answered if `private_messages = true` (off by default, toggle with `.pm`);
 owner commands work in private either way.
 
-Whatever the model produces, only the first line is sent, the bot's own nick echoed at the start is
-removed, and the line is cut to `max_reply_chars` at a word boundary.
+The prompt asks for one short line unless someone explicitly asks for more. If the model does reply
+with several lines, each line is sent as its own message (empty lines and code fences are skipped,
+the bot's own nick echoed at the start is removed). Lines longer than `max_reply_chars` are split at
+word boundaries into several messages, so nothing is lost. Flood control paces the messages.
 
 If a reply is the same as (or very close to) one of the bot's last `repeat_check_lines` lines in that
 channel, the model is asked once more for something different. If it repeats itself again, the bot
@@ -106,7 +108,7 @@ come back to you as NOTICEs.
 | `.join #channel [key]` | join a channel |
 | `.part [#channel] [reason]` | leave a channel (default: the one you typed in) |
 | `.quit [message]` | send QUIT and stop the bot |
-| `.nick newnick` | change nick |
+| `.nick newnick` | change nick (you get a NOTICE with the result; kept across reconnects until restart) |
 | `.say [#channel\|nick] text` | make the bot say something |
 | `.act [#channel\|nick] text` | make the bot do a `/me` |
 | `.thinking [off\|low\|mid\|high]` | show or set `reasoning_effort` |
@@ -126,13 +128,19 @@ kept across reconnects though).
 A nick alone can be taken by anyone while you're offline, so by default the bot also checks the
 NickServ account the message came from (IRCv3 `account-tag`, supported by Libera): you must be
 identified as `owner_account` (defaults to `owner`). Set `owner_require_account = false` to match the
-nick only. Messages from anyone else that look like commands are treated as normal chat.
+nick only. Commands from anyone else are silently dropped: they're neither run nor shown to the LLM,
+so `.nick x` from a random user can't steer the model. Unknown `.words` are normal chat.
+
+The prompt also tells the model that the `<nick>` prefix is the only reliable identity (people can't
+rename themselves or claim to be the owner by saying so), and real nick changes are added to the
+history as `* old is now known as new`.
 
 ## Persona: INSTRUCTIONS.md
 
 The file set by `instructions_file` (default `INSTRUCTIONS.md`) is the start of the system prompt:
 who the bot is, its tone, what it knows. Edit it freely; it's re-read before the next LLM call whenever
-its modification time changes (no restart needed). To keep a personal persona outside git, point
+its modification time changes (no restart needed). `{nick}` in the file is replaced with the bot's
+current nick, so the persona follows `.nick` changes. To keep a personal persona outside git, point
 `instructions_file` at another file, e.g. `INSTRUCTIONS-GM.md` (git-ignored); changing the config
 needs a restart.
 
@@ -208,7 +216,7 @@ chat_template_kwargs = { enable_thinking = false }   # llama.cpp / vLLM, Qwen3-s
 | `context_messages` | `512` | messages kept per channel and sent as context |
 | `conversation_timeout` | `600` | seconds without involvement before going idle |
 | `debounce_seconds` | `2` | wait for people to finish typing |
-| `max_reply_chars` | `300` | maximum reply length |
+| `max_reply_chars` | `300` | maximum length of one message; longer lines are split |
 | `private_messages` | `false` | answer private messages (owner commands always work) |
 | `repeat_check_lines` | `5` | don't repeat any of the bot's last N lines (0 = off) |
 | `repeat_similarity` | `0.9` | similarity counted as a repeat (1.0 = identical, ignoring case/punctuation) |

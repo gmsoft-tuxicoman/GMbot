@@ -22,9 +22,27 @@ def mentions(text: str, names: list[str]) -> bool:
 
 @dataclass
 class Decision:
-    text: str | None  # line to send, if any
+    lines: list[str]  # messages to send, one per line of the reply (empty = say nothing)
     end: bool  # conversation over, go idle
     memories: list[str] = field(default_factory=list)  # facts to store in long-term memory
+
+    @property
+    def text(self) -> str | None:
+        return "\n".join(self.lines) or None
+
+
+def wrap(line: str, max_chars: int) -> list[str]:
+    """Split a line into chunks of at most max_chars, at word boundaries when possible."""
+    chunks: list[str] = []
+    while len(line) > max_chars:
+        cut = line.rfind(" ", 0, max_chars + 1)
+        if cut <= 0:
+            cut = max_chars
+        chunks.append(line[:cut].rstrip())
+        line = line[cut:].lstrip()
+    if line:
+        chunks.append(line)
+    return chunks
 
 
 def parse_reply(raw: str, nick: str, max_chars: int) -> Decision:
@@ -32,13 +50,13 @@ def parse_reply(raw: str, nick: str, max_chars: int) -> Decision:
     raw = REMEMBER_RE.sub(" ", raw)
     end = END in raw.upper()
     text = re.sub(r"\[(SKIP|END)\]", " ", raw, flags=re.IGNORECASE)
-    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    line = re.sub(rf"^(<{re.escape(nick)}>|{re.escape(nick)}\s*:)\s*", "", line, flags=re.IGNORECASE)
-    line = " ".join(line.split())
-    if len(line) > max_chars:
-        cut = line[:max_chars]
-        line = (cut.rsplit(" ", 1)[0] if " " in cut else cut).rstrip(",;:")
-    return Decision(text=line or None, end=end, memories=memories)
+    echo = re.compile(rf"^(<{re.escape(nick)}>|{re.escape(nick)}\s*:)\s*", re.IGNORECASE)
+    lines: list[str] = []
+    for line in text.splitlines():
+        line = " ".join(echo.sub("", line.strip()).split())
+        if line and not re.fullmatch(r"`{3,}\w*", line):  # skip empty lines and code fences
+            lines.extend(wrap(line, max_chars))
+    return Decision(lines=lines, end=end, memories=memories)
 
 
 def _normalize(text: str) -> str:

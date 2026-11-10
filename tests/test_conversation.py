@@ -16,8 +16,8 @@ def test_mentions():
 
 
 def test_parse_reply_single_line_and_cleanup():
-    d = parse_reply("GMbot: sure thing\nsecond line", "GMbot", 300)
-    assert d.text == "sure thing" and not d.end
+    d = parse_reply("GMbot: sure thing\n\n  GMbot: second   line\n```bash\n```", "GMbot", 300)
+    assert d.lines == ["sure thing", "second line"] and not d.end
     assert parse_reply("<GMbot> yo", "GMbot", 300).text == "yo"
 
 
@@ -29,9 +29,11 @@ def test_parse_reply_skip_end():
     assert d.text == "np, cya" and d.end
 
 
-def test_parse_reply_truncates_on_word():
+def test_parse_reply_wraps_long_lines():
     d = parse_reply("word " * 100, "GMbot", 23)
-    assert len(d.text) <= 23 and not d.text.endswith(" ")
+    assert all(len(ln) <= 23 and not ln.endswith(" ") for ln in d.lines)
+    assert " ".join(d.lines) == ("word " * 100).strip()  # nothing lost
+    assert parse_reply("x" * 50, "GMbot", 20).lines == ["x" * 20, "x" * 20, "x" * 10]
 
 
 class FakeIRC:
@@ -201,3 +203,12 @@ async def test_repeat_twice_stays_quiet(tmp_path):
     await say(bot, "alice", "hmm?")
     assert bot.irc.sent == [("#c", "use the lts kernel")]
     assert bot.convs["#c"].active
+
+
+@pytest.mark.asyncio
+async def test_multiline_reply_sent_line_by_line(tmp_path):
+    bot = make_bot(tmp_path, ["first do this\nthen that\nfirst do this"])
+    await say(bot, "alice", "GMbot how?")
+    # each line is its own message; a line repeating an earlier one in the same reply is dropped
+    assert bot.irc.sent == [("#c", "first do this"), ("#c", "then that")]
+    assert [e.text for e in bot.history.entries("#c") if e.is_bot] == ["first do this", "then that"]
