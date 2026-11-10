@@ -62,3 +62,25 @@ def test_llm_request_body_includes_reasoning_effort():
     client.cfg.reasoning_effort = ""
     asyncio.run(client.chat([]))
     assert "reasoning_effort" not in seen
+
+
+def test_llm_logs_thinking(caplog):
+    import asyncio, logging, httpx
+    from gmbot.config import LLMConfig
+    from gmbot.llm import LLMClient
+
+    responses = [
+        {"content": "ok", "reasoning_content": "he asks about $85"},
+        {"content": "<think>inline thoughts</think>ok"},
+    ]
+
+    def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": responses.pop(0)}]})
+
+    client = LLMClient(LLMConfig())
+    client._http = httpx.AsyncClient(base_url="http://x/v1", transport=httpx.MockTransport(handler))
+    with caplog.at_level(logging.DEBUG, logger="gmbot.llm"):
+        assert asyncio.run(client.chat([])) == "ok"
+        assert asyncio.run(client.chat([])) == "ok"
+    assert "llm thinking: he asks about $85" in caplog.text
+    assert "llm thinking: inline thoughts" in caplog.text

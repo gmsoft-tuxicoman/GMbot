@@ -12,6 +12,7 @@ from .config import LLMConfig
 
 log = logging.getLogger(__name__)
 
+_THINK_BLOCK = re.compile(r"<think>(.*?)(?:</think>|$)", re.DOTALL | re.IGNORECASE)
 _THINK = re.compile(r"<think>.*?(</think>|$)", re.DOTALL | re.IGNORECASE)
 
 
@@ -42,7 +43,13 @@ class LLMClient:
             try:
                 r = await self._http.post("/chat/completions", json=body)
                 r.raise_for_status()
-                content = r.json()["choices"][0]["message"].get("content") or ""
+                message = r.json()["choices"][0]["message"]
+                content = message.get("content") or ""
+                # Servers return thinking either in a separate field or inline as <think>...</think>.
+                reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+                inline = "\n".join(m.group(1).strip() for m in _THINK_BLOCK.finditer(content))
+                if thinking := "\n".join(t for t in (reasoning.strip(), inline) if t):
+                    log.debug("llm thinking: %s", thinking)
                 return strip_think(content)
             except (httpx.HTTPError, KeyError, IndexError, ValueError) as e:
                 log.warning("LLM request failed (attempt %d): %s", attempt, e)
