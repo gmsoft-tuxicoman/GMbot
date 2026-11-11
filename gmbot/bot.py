@@ -137,6 +137,9 @@ class Bot:
             conv = self._conv(key)
             if not conv.active:
                 return
+            if not any(not e.is_bot and e.seq > conv.answered_seq for e in self.history.entries(key)):
+                log.debug("[%s] nothing new since the last reply", target)
+                return
             try:
                 await self._respond(key, target, conv)
             except Exception:
@@ -172,15 +175,18 @@ class Bot:
         system = system_prompt(
             self.instructions.text, self.irc.nick, self.cfg.irc.server, where, members, memory, self.cfg.irc.owner
         )
+        entries = self.history.entries(key)
+        seen_seq = entries[-1].seq if entries else 0
         messages = build_messages(
             system,
-            self.history.entries(key),
+            entries,
             self.cfg.llm.context_budget_tokens,
             self.cfg.llm.max_tokens,
         )
         decision = await self._generate(messages, target, conv)
         if decision is None:
             return
+        conv.answered_seq = max(conv.answered_seq, seen_seq)
         if decision.lines:
             # Repeated lines are dropped, not retried; if nothing new is left the bot stays quiet.
             lines = self._new_lines(key, decision.lines)
@@ -193,15 +199,17 @@ class Bot:
                 self.memory.forget_fact(fact)
             for fact in decision.memories:
                 self.memory.add(fact, speaker, target if is_channel(target) else "pm")
+        after = seen_seq
         for line in decision.lines:
             if line.startswith(ACTION_PREFIX):
                 sent = self.irc.action(target, line[len(ACTION_PREFIX) :])
-                self.history.add(key, Entry(nick=self.irc.nick, text=sent, is_bot=True, is_action=True))
+                entry = Entry(nick=self.irc.nick, text=sent, is_bot=True, is_action=True)
                 log.info("[%s] * %s %s", target, self.irc.nick, sent)
             else:
                 sent = self.irc.privmsg(target, line)
-                self.history.add(key, Entry(nick=self.irc.nick, text=sent, is_bot=True))
+                entry = Entry(nick=self.irc.nick, text=sent, is_bot=True)
                 log.info("[%s] <%s> %s", target, self.irc.nick, sent)
+            after = self.history.add_after(key, after, entry).seq
         if decision.lines:
             conv.touch()
         elif not decision.end:

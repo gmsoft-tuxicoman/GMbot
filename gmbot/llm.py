@@ -51,8 +51,13 @@ class LLMClient:
                 if thinking := "\n".join(t for t in (reasoning.strip(), inline) if t):
                     log.debug("llm thinking: %s", thinking)
                 return strip_think(content)
+            except httpx.TimeoutException as e:
+                # No retry: a local server usually keeps working on the abandoned request, so a retry
+                # would queue behind it and answer minutes late. The next message starts a fresh turn.
+                log.warning("LLM request timed out after %.0fs (%s), giving up", self.cfg.timeout, type(e).__name__)
+                return None
             except (httpx.HTTPError, KeyError, IndexError, ValueError) as e:
-                log.warning("LLM request failed (attempt %d): %s", attempt, e)
+                log.warning("LLM request failed (attempt %d): %s: %s", attempt, type(e).__name__, e)
                 if attempt == 1:
                     await asyncio.sleep(2)
         return None

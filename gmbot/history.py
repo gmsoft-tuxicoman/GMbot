@@ -40,6 +40,7 @@ class Entry:
     is_bot: bool = False
     is_action: bool = False
     ts: float = field(default_factory=time.time)
+    seq: int = 0  # set by History.add: increasing order of arrival
 
     def render(self) -> str:
         if self.is_bot:
@@ -52,9 +53,29 @@ class History:
     def __init__(self, max_entries: int):
         self.max_entries = max_entries
         self._logs: dict[str, deque[Entry]] = {}
+        self._seq = 0
 
-    def add(self, target: str, entry: Entry) -> None:
+    def add(self, target: str, entry: Entry) -> Entry:
+        self._seq += 1
+        entry.seq = self._seq
         self._logs.setdefault(target, deque(maxlen=self.max_entries)).append(entry)
+        return entry
+
+    def add_after(self, target: str, after_seq: int, entry: Entry) -> Entry:
+        """Insert entry right after the entry with seq after_seq (or append if it's gone or last).
+
+        Used for the bot's replies: messages that arrived while the reply was being generated stay
+        after it, so the next turn shows the model those messages as new instead of ending on its reply.
+        """
+        log_ = self._logs.setdefault(target, deque(maxlen=self.max_entries))
+        idx = next((i + 1 for i, e in enumerate(log_) if e.seq == after_seq), len(log_))
+        self._seq += 1
+        entry.seq = self._seq
+        if len(log_) == log_.maxlen:  # deque.insert refuses when full: drop the oldest first
+            log_.popleft()
+            idx = max(idx - 1, 0)
+        log_.insert(idx, entry)
+        return entry
 
     def clear(self, target: str) -> None:
         self._logs.pop(target, None)

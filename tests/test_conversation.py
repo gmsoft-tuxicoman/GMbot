@@ -273,3 +273,46 @@ async def test_forget_then_remember_updates(tmp_path):
     await say(bot, "alice", "actually i switched to arch")
     assert [f.split(" (")[0] for f in bot.memory.facts] == ["alice runs arch now"]
     assert bot.irc.sent[-1] == ("#c", "ah ok")
+
+
+@pytest.mark.asyncio
+async def test_message_during_generation_does_not_cause_double_answer(tmp_path):
+    bot = make_bot(tmp_path, [])
+    calls = []
+
+    async def slow_chat(messages):
+        calls.append(messages)
+        await asyncio.sleep(0.05)
+        return "[SKIP]" if len(calls) > 1 else "it depends on the model"
+
+    bot.llm.chat = slow_chat
+    await bot.on_message("alice", "#c", "GMbot is $85 of tokens a lot?", False)
+    await asyncio.sleep(0.01)  # generating
+    await bot.on_message("bob", "#c", "lol", False)
+    await asyncio.sleep(0.2)
+    assert bot.irc.sent == [("#c", "it depends on the model")]
+    # second turn: the reply sits where it was generated and bob's message comes after it
+    assert [m["role"] for m in calls[1][1:]] == ["user", "assistant", "user"]
+    assert calls[1][-1]["content"] == "<bob> lol"
+
+
+@pytest.mark.asyncio
+async def test_no_new_messages_no_new_turn(tmp_path):
+    bot = make_bot(tmp_path, ["hey"])
+    await say(bot, "alice", "GMbot hi")
+    # a stray extra turn with nothing new since the reply must not call the llm
+    await bot._respond_later("#c", "#c")
+    assert len(bot.llm.calls) == 1
+
+
+def test_history_add_after_when_full():
+    from gmbot.history import Entry, History
+
+    h = History(3)
+    a = h.add("#c", Entry("a", "1"))
+    h.add("#c", Entry("b", "2"))
+    h.add("#c", Entry("c", "3"))
+    h.add_after("#c", a.seq, Entry("bot", "r", is_bot=True))  # full: oldest dropped, still inserted
+    assert [e.text for e in h.entries("#c")] == ["r", "2", "3"]
+    h.add_after("#c", 9999, Entry("bot", "x", is_bot=True))  # unknown seq: appended
+    assert h.entries("#c")[-1].text == "x"

@@ -90,6 +90,7 @@ class Conversation:
         self.timeout = timeout
         self.active = False
         self.last_involved = 0.0
+        self.answered_seq = 0  # history seq of the last message the model has already responded to
 
     def activate(self) -> None:
         self.active = True

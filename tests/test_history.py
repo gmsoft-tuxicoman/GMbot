@@ -84,3 +84,21 @@ def test_llm_logs_thinking(caplog):
         assert asyncio.run(client.chat([])) == "ok"
     assert "llm thinking: he asks about $85" in caplog.text
     assert "llm thinking: inline thoughts" in caplog.text
+
+
+def test_llm_timeout_is_not_retried(caplog):
+    import asyncio, httpx
+    from gmbot.config import LLMConfig
+    from gmbot.llm import LLMClient
+
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        raise httpx.ReadTimeout("", request=request)
+
+    client = LLMClient(LLMConfig())
+    client._http = httpx.AsyncClient(base_url="http://x/v1", transport=httpx.MockTransport(handler))
+    assert asyncio.run(client.chat([])) is None
+    assert len(calls) == 1
+    assert "timed out after 120s (ReadTimeout)" in caplog.text
