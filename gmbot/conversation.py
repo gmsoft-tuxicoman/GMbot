@@ -48,6 +48,10 @@ def wrap(line: str, max_chars: int) -> list[str]:
     return chunks
 
 
+# A "[14:32] " the model copied from the history format.
+TIMESTAMP_RE = re.compile(r"^\[\d{1,2}:\d{2}(:\d{2})?\]\s*")
+
+
 def parse_reply(raw: str, nick: str, max_chars: int) -> Decision:
     memories = [m.strip() for m in REMEMBER_RE.findall(raw) if m.strip()]
     forgets = [m.strip() for m in FORGET_RE.findall(raw) if m.strip()]
@@ -58,7 +62,7 @@ def parse_reply(raw: str, nick: str, max_chars: int) -> Decision:
     lines: list[str] = []
     action = re.compile(rf"^(/me\s+|\*\s*{re.escape(nick)}\s+)", re.IGNORECASE)
     for line in text.splitlines():
-        line = " ".join(echo.sub("", line.strip()).split())
+        line = " ".join(echo.sub("", TIMESTAMP_RE.sub("", line.strip())).split())
         if not line or re.fullmatch(r"`{3,}\w*", line):  # skip empty lines and code fences
             continue
         # "/me does x" (or "* nick does x", copied from how others' actions look) is an action.

@@ -85,4 +85,4 @@ def test_nick_change_tracking_and_errors():
 def test_instructions_nick_placeholder():
     from gmbot.history import system_prompt
 
-    assert system_prompt("you're {nick}", "NewBot", "net", "#c", []).startswith("you're NewBot")
+    assert system_prompt("you're {nick}", "NewBot", "net", "#c", memory=False).startswith("you're NewBot")

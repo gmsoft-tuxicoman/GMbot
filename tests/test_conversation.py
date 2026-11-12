@@ -19,6 +19,8 @@ def test_parse_reply_single_line_and_cleanup():
     d = parse_reply("GMbot: sure thing\n\n  GMbot: second   line\n```bash\n```", "GMbot", 300)
     assert d.lines == ["sure thing", "second line"] and not d.end
     assert parse_reply("<GMbot> yo", "GMbot", 300).text == "yo"
+    assert parse_reply("[14:32] <GMbot> yo", "GMbot", 300).text == "yo"
+    assert parse_reply("[9:05] nah", "GMbot", 300).text == "nah"
 
 
 def test_parse_reply_skip_end():
@@ -155,7 +157,8 @@ async def test_memory_written_and_used(tmp_path):
     content = (tmp_path / "MEMORY.md").read_text()
     assert "- alice runs gentoo on her laptop (alice, #c, " in content
     await say(bot, "alice", "what do i run?")
-    assert "alice runs gentoo on her laptop" in bot.llm.calls[-1][0]["content"]
+    note = bot.llm.calls[-1][-1]["content"].split("[context]", 1)[1]
+    assert "your memory:\n- alice runs gentoo on her laptop (alice, #c, " in note
 
 
 def test_memory_dedup_and_cap(tmp_path):
@@ -175,8 +178,12 @@ def test_memory_dedup_and_cap(tmp_path):
 def test_memory_disabled_has_no_rules():
     from gmbot.history import system_prompt
 
-    assert "REMEMBER" not in system_prompt("", "GMbot", "net", "#c", [])
-    assert "(nothing yet)" in system_prompt("", "GMbot", "net", "#c", [], memory="")
+    from gmbot.history import context_note
+
+    assert "REMEMBER" not in system_prompt("", "GMbot", "net", "#c", memory=False)
+    assert "REMEMBER" in system_prompt("", "GMbot", "net", "#c", memory=True)
+    assert "memory" not in context_note("#c", [], None)
+    assert "your memory:\n(nothing yet)" in context_note("#c", [], "")
 
 
 def test_is_repeat():
@@ -293,7 +300,7 @@ async def test_message_during_generation_does_not_cause_double_answer(tmp_path):
     assert bot.irc.sent == [("#c", "it depends on the model")]
     # second turn: the reply sits where it was generated and bob's message comes after it
     assert [m["role"] for m in calls[1][1:]] == ["user", "assistant", "user"]
-    assert calls[1][-1]["content"] == "<bob> lol"
+    assert calls[1][-1]["content"].split("\n\n[context]")[0].endswith("] <bob> lol")
 
 
 @pytest.mark.asyncio

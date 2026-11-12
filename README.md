@@ -138,6 +138,24 @@ The prompt also tells the model that the `<nick>` prefix is the only reliable id
 rename themselves or claim to be the owner by saying so), and real nick changes are added to the
 history as `* old is now known as new`.
 
+Each line from others is shown to the model with its UTC time (`[14:32] <alice> hi`), and a pause of
+30 minutes or more is marked with a `--- 4h12 later ---` line. The model is told that what came before
+a long pause is a finished conversation, so it doesn't react to an old topic hours later. The bot's own
+lines carry no timestamp, so the model doesn't start writing them; a copied `[14:32]` is stripped anyway.
+
+The prompt is laid out so the LLM server can reuse its prompt cache (llama.cpp and most local servers
+only reprocess the prompt from the first token that changed since the last request):
+
+- the system prompt holds only what rarely changes: the persona and the fixed rules;
+- what changes all the time (current time, people in the channel, the memory) is a `[context]` note
+  appended to the last message;
+- when the history is over `context_messages` or the prompt over `context_budget_tokens`, the oldest
+  10% of the lines are dropped in one go, so the start of the conversation then stays the same for many
+  requests in a row instead of shifting by one line on every message.
+
+So a large context (say 100k tokens on a 128k model) costs a full prompt processing only now and then;
+most replies only process the few new lines.
+
 ## Persona: INSTRUCTIONS.md
 
 The file set by `instructions_file` (default `INSTRUCTIONS.md`) is the start of the system prompt:
@@ -202,7 +220,7 @@ All options with their defaults. See `config.example.toml` for a commented templ
 | `temperature` | `0.8` | sampling temperature |
 | `max_tokens` | `1024` | max output tokens, thinking included |
 | `reasoning_effort` | `"low"` | `"low"`, `"medium"`, `"high"`, or `""` to not send it |
-| `context_budget_tokens` | `16000` | approximate prompt size; the oldest messages are dropped beyond it |
+| `context_budget_tokens` | `16000` | approximate prompt size, reply included (~chars/4); keep it ~20% under the server's context. Beyond it, the oldest 10% of the lines are dropped at once |
 | `timeout` | `120` | HTTP timeout in seconds |
 | `extra_body` | `{}` | extra fields merged into every request (server-specific options) |
 
@@ -221,7 +239,7 @@ chat_template_kwargs = { enable_thinking = false }   # llama.cpp / vLLM, Qwen3-s
 | `ctcp_version` | `"GMbot 0.1 (Python asyncio IRC bot)"` | CTCP VERSION reply |
 | `aliases` | `[]` | other names that wake the bot up |
 | `ignore` | `["ChanServ", "NickServ"]` | nicks that never trigger it |
-| `context_messages` | `512` | messages kept per channel and sent as context |
+| `context_messages` | `512` | messages kept per channel and sent as context; beyond it, the oldest 10% are dropped at once |
 | `conversation_timeout` | `600` | seconds without involvement before going idle |
 | `debounce_seconds` | `2` | wait for people to finish typing |
 | `max_reply_chars` | `300` | maximum length of one message; longer lines are split |

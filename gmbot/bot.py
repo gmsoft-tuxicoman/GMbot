@@ -9,7 +9,7 @@ import signal
 from .commands import Commands
 from .config import Config
 from .conversation import ACTION_PREFIX, Conversation, Decision, is_repeat, mentions, parse_reply
-from .history import Entry, History, Instructions, build_messages, system_prompt
+from .history import Entry, History, Instructions, build_messages, context_note, system_prompt
 from .irc import IRCClient, irc_lower, is_channel, strip_formatting
 from .llm import LLMClient
 from .memory import Memory
@@ -171,10 +171,10 @@ class Bot:
     async def _respond(self, key: str, target: str, conv: Conversation) -> None:
         where = target if is_channel(target) else f"a private chat with {target}"
         members = self.irc.channel_members(target) if is_channel(target) else [target, self.irc.nick]
-        memory = self.memory.text if self.memory else None
         system = system_prompt(
-            self.instructions.text, self.irc.nick, self.cfg.irc.server, where, members, memory, self.cfg.irc.owner
+            self.instructions.text, self.irc.nick, self.cfg.irc.server, where, self.memory is not None, self.cfg.irc.owner
         )
+        note = context_note(where, members, self.memory.text if self.memory else None)
         entries = self.history.entries(key)
         seen_seq = entries[-1].seq if entries else 0
         messages = build_messages(
@@ -182,6 +182,8 @@ class Bot:
             entries,
             self.cfg.llm.context_budget_tokens,
             self.cfg.llm.max_tokens,
+            self.history.window(key),
+            note,
         )
         decision = await self._generate(messages, target, conv)
         if decision is None:
