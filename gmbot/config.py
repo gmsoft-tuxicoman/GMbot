@@ -57,9 +57,15 @@ class BotConfig:
     command_prefix: str = "."
     owner_account: str = ""  # services account allowed to run commands; defaults to irc.owner
     owner_require_account: bool = True  # also check the account, not just the (spoofable) nick
-    memory_enabled: bool = True
-    memory_file: str = "MEMORY.md"
-    memory_max_facts: int = 200
+    memory_enabled: bool = True  # take notes about channels and people after conversations
+    memory_dir: str = "memory"
+    memory_pause: float = 1800.0  # summarize a channel's new lines after this many seconds of quiet
+    memory_max_lines: int = 300  # ...or once this many new lines piled up
+    memory_max_facts: int = 30  # lines of notes per person and per channel
+    memory_nick_fallback: bool = False  # keep notes by nick for people who aren't identified (spoofable)
+    memory_journal_max: int = 60  # past-conversation entries per channel before the oldest are condensed
+    memory_reasoning_effort: str = "medium"  # thinking for the summary pass ("" = don't send)
+    memory_max_tokens: int = 4096  # for the summary pass, thinking included
 
 
 @dataclass
@@ -79,7 +85,7 @@ class Config:
 
     @property
     def memory_path(self) -> Path:
-        return self._path(self.bot.memory_file)
+        return self._path(self.bot.memory_dir)
 
 
 def _fill(cls, data: dict):

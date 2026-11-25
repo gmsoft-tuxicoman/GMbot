@@ -20,6 +20,7 @@ THINKING_LEVELS = {"off": "", "none": "", "low": "low", "mid": "medium", "medium
 class Context:
     nick: str
     target: str  # channel the command was typed in, or the owner's nick for a private message
+    account: str | None = None
 
     @property
     def channel(self) -> str | None:
@@ -28,11 +29,14 @@ class Context:
 
 Handler = Callable[["Commands", Context, list[str]], Awaitable[None]]
 _COMMANDS: dict[str, tuple[Handler, str]] = {}
+_PUBLIC: set[str] = set()  # commands anyone can run, not just the owner
 
 
-def command(name: str, usage: str):
+def command(name: str, usage: str, public: bool = False):
     def register(fn: Handler) -> Handler:
         _COMMANDS[name] = (fn, usage)
+        if public:
+            _PUBLIC.add(name)
         return fn
 
     return register
@@ -55,19 +59,25 @@ class Commands:
             return True
         return account is not None and irc_lower(account) == self.owner_account
 
-    def is_command(self, text: str) -> bool:
-        name = text[len(self.prefix) :].split(" ", 1)[0].lower()
-        return text.startswith(self.prefix) and name in _COMMANDS
+    def _name(self, text: str) -> str:
+        return text[len(self.prefix) :].split(" ", 1)[0].lower()
 
-    async def handle(self, nick: str, target: str, text: str) -> None:
+    def is_command(self, text: str) -> bool:
+        return text.startswith(self.prefix) and self._name(text) in _COMMANDS
+
+    def is_public(self, text: str) -> bool:
+        return self._name(text) in _PUBLIC
+
+    async def handle(self, nick: str, target: str, text: str, account: str | None = None) -> None:
         name, *args = text[len(self.prefix) :].split()
         fn, _ = _COMMANDS[name.lower()]
-        log.info("owner command from %s in %s: %s", nick, target, text)
+        log.info("command from %s in %s: %s", nick, target, text)
+        ctx = Context(nick, target, account)
         try:
-            await fn(self, Context(nick, target), args)
+            await fn(self, ctx, args)
         except Exception as e:
             log.exception("command %s failed", name)
-            self.reply(Context(nick, target), f"error: {e}")
+            self.reply(ctx, f"error: {e}")
 
     def reply(self, ctx: Context, text: str) -> None:
         self.bot.irc.notice(ctx.nick, text)
@@ -190,33 +200,59 @@ class Commands:
         self.bot.reset(irc_lower(target))
         self.reply(ctx, f"history cleared for {target}")
 
-    @command("remember", "remember fact - add a fact to long-term memory")
-    async def _remember(self, ctx: Context, args: list[str]) -> None:
-        if not self.bot.memory:
-            return self.reply(ctx, "memory is disabled")
-        if not args:
-            return self.reply(ctx, f"usage: {self.prefix}remember fact")
-        added = self.bot.memory.add(" ".join(args), ctx.nick, "manual")
-        self.reply(ctx, "remembered" if added else "already known")
-
-    @command("forget", "forget text - remove memory facts containing text")
+    @command("forget", "forget #channel|account [text] - remove notes containing text (all of them without text)")
     async def _forget(self, ctx: Context, args: list[str]) -> None:
         if not self.bot.memory:
             return self.reply(ctx, "memory is disabled")
         if not args:
-            return self.reply(ctx, f"usage: {self.prefix}forget text")
-        n = self.bot.memory.forget(" ".join(args))
-        self.reply(ctx, f"forgot {n} fact{'s' if n != 1 else ''}")
+            return self.reply(ctx, f"usage: {self.prefix}forget #channel|account [text]")
+        notes = self.bot.memory.target(args[0])
+        if len(args) == 1:
+            return self.reply(ctx, f"deleted the notes about {args[0]}" if notes.delete() else f"no notes about {args[0]}")
+        n = notes.remove_matching(" ".join(args[1:]))
+        self.reply(ctx, f"removed {n} line{'s' if n != 1 else ''} from the notes about {args[0]}")
 
-    @command("memory", "memory [n] - show the last n remembered facts (default 5)")
+    @command("forgetme", "forgetme - make the bot forget everything it noted about you (anyone can use it)", public=True)
+    async def _forgetme(self, ctx: Context, args: list[str]) -> None:
+        if not self.bot.memory:
+            return self.reply(ctx, "i don't keep notes about anyone")
+        who = ctx.account or (ctx.nick if self.bot.cfg.bot.memory_nick_fallback else None)
+        if not who:
+            return self.reply(ctx, "notes are kept per NickServ account, and you're not identified, so there's nothing about you")
+        deleted = self.bot.memory.person(who).delete()
+        log.info("%s (account %s) asked to be forgotten: %s", ctx.nick, ctx.account, "done" if deleted else "no notes")
+        self.reply(ctx, "done, i forgot everything i noted about you" if deleted else "i had no notes about you")
+
+    @command("memory", "memory [#channel|account] - show the notes about a channel (default: this one) or a person")
     async def _memory(self, ctx: Context, args: list[str]) -> None:
         if not self.bot.memory:
             return self.reply(ctx, "memory is disabled")
-        facts = self.bot.memory.facts
-        n = int(args[0]) if args and args[0].isdigit() else 5
-        self.reply(ctx, f"{len(facts)} fact{'s' if len(facts) != 1 else ''} in {self.bot.memory.path.name}")
-        for fact in facts[-n:] if n else []:
-            self.reply(ctx, fact)
+        name = args[0] if args else ctx.channel
+        if not name:
+            people, channels = self.bot.memory.counts()
+            return self.reply(ctx, f"notes about {people} people and {channels} channels; usage: {self.prefix}memory #channel|account")
+        notes = self.bot.memory.target(name)
+        sections = [(sec, notes.get(sec)) for sec in ("about", "journal", "facts")]
+        if not any(lines for _, lines in sections):
+            return self.reply(ctx, f"no notes about {name}")
+        for sec, lines in sections:
+            if lines:
+                shown = lines[-10:]
+                more = f" (last {len(shown)} of {len(lines)})" if len(lines) > len(shown) else ""
+                self.reply(ctx, f"{name} {sec}{more}:")
+                for line in shown:
+                    self.reply(ctx, f"- {line}")
+
+    @command("digest", "digest [#channel] - summarize the channel's new lines into the notes now")
+    async def _digest(self, ctx: Context, args: list[str]) -> None:
+        chan = self._channel_arg(ctx, args)
+        if not chan:
+            return self.reply(ctx, f"usage: {self.prefix}digest #channel")
+        if not self.bot.memory:
+            return self.reply(ctx, "memory is disabled")
+        self.reply(ctx, f"summarizing {chan}...")
+        done = await self.bot.digest(irc_lower(chan))
+        self.reply(ctx, "notes updated" if done else "nothing new to summarize (or the summary failed, see the log)")
 
     @command("status", "status - show channels, conversations and settings")
     async def _status(self, ctx: Context, args: list[str]) -> None:
@@ -227,4 +263,5 @@ class Commands:
         self.reply(ctx, f"model {llm.model}, thinking {llm.reasoning_effort or 'off'}, private messages {pm}")
         self.reply(ctx, f"active: {', '.join(active) or 'none'}; muted: {', '.join(sorted(bot.muted)) or 'none'}")
         if bot.memory:
-            self.reply(ctx, f"memory: {len(bot.memory.facts)} facts")
+            people, channels = bot.memory.counts()
+            self.reply(ctx, f"memory: notes about {people} people and {channels} channels")

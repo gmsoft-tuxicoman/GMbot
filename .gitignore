@@ -5,3 +5,4 @@ MEMORY.md
 .pytest_cache/
 INSTRUCTIONS-GM.md
 *.swp
+memory/

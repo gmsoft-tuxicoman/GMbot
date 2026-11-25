@@ -152,10 +152,13 @@ class IRCClient:
         except (OSError, ConnectionError, TimeoutError):
             pass
 
+    def text_bytes(self, target: str) -> int:
+        """How many bytes of text fit in one PRIVMSG to target."""
+        return MAX_LINE - len(f"PRIVMSG {target} :".encode()) - PREFIX_RESERVE - 2
+
     def privmsg(self, target: str, text: str) -> str:
         """Queue a PRIVMSG; returns the (possibly truncated) text that will be sent."""
-        overhead = len(f"PRIVMSG {target} :".encode()) + PREFIX_RESERVE + 2
-        text = truncate_utf8(text.replace("\r", " ").replace("\n", " "), MAX_LINE - overhead)
+        text = truncate_utf8(text.replace("\r", " ").replace("\n", " "), self.text_bytes(target))
         self._queue.put_nowait(f"PRIVMSG {target} :{text}")
         return text
 

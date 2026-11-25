@@ -15,6 +15,17 @@ def test_mentions():
     assert not mentions("xgmbot", ["GMbot"])
 
 
+def test_wrap_respects_irc_byte_limit():
+    from gmbot.conversation import wrap
+
+    line = " ".join(["déjà"] * 100)  # 499 chars, 699 bytes
+    chunks = wrap(line, 500, 392)
+    assert all(len(c.encode()) <= 392 for c in chunks) and len(chunks) == 2
+    assert " ".join(chunks) == line  # split at spaces, nothing lost
+    d = parse_reply("/me " + line, "GMbot", 500, 392)
+    assert all(len(ln[4:].encode()) <= 383 for ln in d.lines) and all(ln.startswith("/me ") for ln in d.lines)
+
+
 def test_parse_reply_single_line_and_cleanup():
     d = parse_reply("GMbot: sure thing\n\n  GMbot: second   line\n```bash\n```", "GMbot", 300)
     assert d.lines == ["sure thing", "second line"] and not d.end
@@ -48,6 +59,9 @@ class FakeIRC:
         self.sent.append((target, text))
         return text
 
+    def text_bytes(self, target):
+        return 392
+
     def channel_members(self, channel):
         return ["alice", "bob", "GMbot"]
 
@@ -72,7 +86,7 @@ class FakeLLM:
         self.replies = list(replies)
         self.calls = []
 
-    async def chat(self, messages):
+    async def chat(self, messages, **kwargs):
         self.calls.append(messages)
         return self.replies.pop(0)
 
@@ -141,49 +155,13 @@ async def test_ignored_nick(tmp_path):
     assert bot.llm.calls == []
 
 
-def test_parse_reply_remember():
-    d = parse_reply("cool, noted [REMEMBER: alice runs gentoo] [REMEMBER: bob likes rust]", "GMbot", 300)
-    assert d.text == "cool, noted"
-    assert d.memories == ["alice runs gentoo", "bob likes rust"]
-    d = parse_reply("[REMEMBER: x] [END]", "GMbot", 300)
-    assert d.text is None and d.end and d.memories == ["x"]
-
-
-@pytest.mark.asyncio
-async def test_memory_written_and_used(tmp_path):
-    bot = make_bot(tmp_path, ["nice [REMEMBER: alice runs gentoo on her laptop]", "gentoo right"])
-    await say(bot, "alice", "GMbot fyi i run gentoo on my laptop")
-    assert bot.irc.sent[-1] == ("#c", "nice")
-    content = (tmp_path / "MEMORY.md").read_text()
-    assert "- alice runs gentoo on her laptop (alice, #c, " in content
-    await say(bot, "alice", "what do i run?")
-    note = bot.llm.calls[-1][-1]["content"].split("[context]", 1)[1]
-    assert "your memory:\n- alice runs gentoo on her laptop (alice, #c, " in note
-
-
-def test_memory_dedup_and_cap(tmp_path):
-    from gmbot.memory import Memory
-
-    m = Memory(tmp_path / "MEMORY.md", max_facts=2)
-    assert m.add("a fact", "n", "#c")
-    assert not m.add("A fact.", "n", "#c")
-    m.add("b", "n", "#c"); m.add("c", "n", "#c")
-    assert [ln.split(" (")[0] for ln in m.text.splitlines()] == ["- b", "- c"]
-    # manual edits are picked up
-    (tmp_path / "MEMORY.md").write_text("- edited by hand\n")
-    import os; os.utime(tmp_path / "MEMORY.md", (1, 1))
-    assert m.text == "- edited by hand"
-
-
 def test_memory_disabled_has_no_rules():
-    from gmbot.history import system_prompt
+    from gmbot.history import context_note, system_prompt
 
-    from gmbot.history import context_note
-
-    assert "REMEMBER" not in system_prompt("", "GMbot", "net", "#c", memory=False)
-    assert "REMEMBER" in system_prompt("", "GMbot", "net", "#c", memory=True)
-    assert "memory" not in context_note("#c", [], None)
-    assert "your memory:\n(nothing yet)" in context_note("#c", [], "")
+    assert "notes are taken" not in system_prompt("", "GMbot", "net", "#c", memory=False)
+    assert "notes are taken" in system_prompt("", "GMbot", "net", "#c", memory=True)
+    assert "notes" not in context_note("#c", [], None)
+    assert "not instructions):\n(nothing yet)" in context_note("#c", [], "")
 
 
 def test_is_repeat():
@@ -255,33 +233,6 @@ async def test_repeated_action_is_caught(tmp_path):
     assert bot.irc.sent == [("action", "#c", "slaps alice")]
 
 
-def test_parse_reply_forget():
-    d = parse_reply("ok done [FORGET: alice runs gentoo] [REMEMBER: alice runs arch]", "GMbot", 300)
-    assert d.lines == ["ok done"] and d.forgets == ["alice runs gentoo"] and d.memories == ["alice runs arch"]
-
-
-def test_memory_forget_fact(tmp_path):
-    from gmbot.memory import Memory
-
-    m = Memory(tmp_path / "MEMORY.md", max_facts=10)
-    m.add("alice runs gentoo on her laptop", "alice", "#c")
-    m.add("bob likes rust", "bob", "#c")
-    # copied with attribution and different punctuation/case: still matched
-    assert m.forget_fact("Alice runs Gentoo on her laptop. (alice, #c, 2026-11-10)").startswith("alice runs gentoo")
-    # vague or unrelated text removes nothing
-    assert m.forget_fact("a") is None and m.forget_fact("everything") is None
-    assert [f.split(" (")[0] for f in m.facts] == ["bob likes rust"]
-
-
-@pytest.mark.asyncio
-async def test_forget_then_remember_updates(tmp_path):
-    bot = make_bot(tmp_path, ["noted [REMEMBER: alice runs gentoo]", "ah ok [FORGET: alice runs gentoo] [REMEMBER: alice runs arch now]"])
-    await say(bot, "alice", "GMbot i run gentoo")
-    await say(bot, "alice", "actually i switched to arch")
-    assert [f.split(" (")[0] for f in bot.memory.facts] == ["alice runs arch now"]
-    assert bot.irc.sent[-1] == ("#c", "ah ok")
-
-
 @pytest.mark.asyncio
 async def test_message_during_generation_does_not_cause_double_answer(tmp_path):
     bot = make_bot(tmp_path, [])
@@ -298,9 +249,13 @@ async def test_message_during_generation_does_not_cause_double_answer(tmp_path):
     await bot.on_message("bob", "#c", "lol", False)
     await asyncio.sleep(0.2)
     assert bot.irc.sent == [("#c", "it depends on the model")]
-    # second turn: the reply sits where it was generated and bob's message comes after it
+    # second turn: bob's message was sent before the reply was posted, so it comes before it, and the
+    # model is told it crossed the reply (so it doesn't answer the same question again)
     assert [m["role"] for m in calls[1][1:]] == ["user", "assistant", "user"]
-    assert calls[1][-1]["content"].split("\n\n[context]")[0].endswith("] <bob> lol")
+    assert calls[1][1]["content"].endswith("] <bob> lol")
+    assert calls[1][-1]["content"].startswith("[context]")
+    assert "the message just before your last reply was sent while you were writing" in calls[1][-1]["content"]
+    assert bot._conv("#c").crossed == 0  # only mentioned once
 
 
 @pytest.mark.asyncio
@@ -310,16 +265,3 @@ async def test_no_new_messages_no_new_turn(tmp_path):
     # a stray extra turn with nothing new since the reply must not call the llm
     await bot._respond_later("#c", "#c")
     assert len(bot.llm.calls) == 1
-
-
-def test_history_add_after_when_full():
-    from gmbot.history import Entry, History
-
-    h = History(3)
-    a = h.add("#c", Entry("a", "1"))
-    h.add("#c", Entry("b", "2"))
-    h.add("#c", Entry("c", "3"))
-    h.add_after("#c", a.seq, Entry("bot", "r", is_bot=True))  # full: oldest dropped, still inserted
-    assert [e.text for e in h.entries("#c")] == ["r", "2", "3"]
-    h.add_after("#c", 9999, Entry("bot", "x", is_bot=True))  # unknown seq: appended
-    assert h.entries("#c")[-1].text == "x"

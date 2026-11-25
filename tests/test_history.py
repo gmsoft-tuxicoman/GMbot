@@ -159,3 +159,14 @@ def test_llm_timeout_is_not_retried(caplog):
     assert asyncio.run(client.chat([])) is None
     assert len(calls) == 1
     assert "timed out after 120s (ReadTimeout)" in caplog.text
+
+
+def test_split_think_handles_lone_closing_tag():
+    from gmbot.llm import split_think
+
+    assert split_think("<think>hmm</think>\n\nsalut") == ("hmm", "salut")
+    # Qwen-style templates put the opening <think> in the prompt: only the closing tag comes back
+    assert split_think("je réfléchis</think>\n\nsalut") == ("je réfléchis", "salut")
+    assert split_think("</think>\n\nsalut") == ("", "salut")
+    assert split_think("<think>unfinished") == ("unfinished", "")
+    assert split_think("just an answer") == ("", "just an answer")

@@ -85,18 +85,6 @@ async def test_say_act_quit(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_memory_commands(tmp_path):
-    bot = owner_bot(tmp_path)
-    await say(bot, "GMsoft", ".remember bob uses arch", account="GMsoft")
-    await say(bot, "GMsoft", ".remember alice uses gentoo", account="GMsoft")
-    assert len(bot.memory.facts) == 2
-    await say(bot, "GMsoft", ".forget bob", account="GMsoft")
-    assert [f.split(" (")[0] for f in bot.memory.facts] == ["alice uses gentoo"]
-    await say(bot, "GMsoft", ".memory", account="GMsoft")
-    assert bot.irc.sent[-2] == ("notice", "GMsoft", "1 fact in MEMORY.md")
-
-
-@pytest.mark.asyncio
 async def test_stop_goes_idle_keeps_history(tmp_path):
     bot = owner_bot(tmp_path, ["hey", "should not be called"])
     await say(bot, "alice", "GMbot hi")

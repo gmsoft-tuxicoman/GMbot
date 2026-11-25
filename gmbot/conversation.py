@@ -5,13 +5,11 @@ from __future__ import annotations
 import re
 import time
 from difflib import SequenceMatcher
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .history import END, SKIP
 
 ACTION_PREFIX = "/me "  # marks a reply line to be sent as a CTCP ACTION
-REMEMBER_RE = re.compile(r"\[REMEMBER:\s*([^\]]*)\]", re.IGNORECASE)
-FORGET_RE = re.compile(r"\[FORGET:\s*([^\]]*)\]", re.IGNORECASE)
 
 
 def mentions(text: str, names: list[str]) -> bool:
@@ -26,21 +24,28 @@ def mentions(text: str, names: list[str]) -> bool:
 class Decision:
     lines: list[str]  # messages to send, one per line of the reply (empty = say nothing)
     end: bool  # conversation over, go idle
-    memories: list[str] = field(default_factory=list)  # facts to store in long-term memory
-    forgets: list[str] = field(default_factory=list)  # facts to remove from long-term memory
 
     @property
     def text(self) -> str | None:
         return "\n".join(self.lines) or None
 
 
-def wrap(line: str, max_chars: int) -> list[str]:
-    """Split a line into chunks of at most max_chars, at word boundaries when possible."""
+def _fits(line: str, max_chars: int, max_bytes: int) -> int:
+    """How many characters of line fit in max_chars and (if set) max_bytes of UTF-8."""
+    n = min(len(line), max_chars)
+    if max_bytes:
+        n = min(n, len(line.encode()[:max_bytes].decode(errors="ignore")))
+    return n
+
+
+def wrap(line: str, max_chars: int, max_bytes: int = 0) -> list[str]:
+    """Split a line into chunks of at most max_chars (and max_bytes, if set), at word boundaries
+    when possible."""
     chunks: list[str] = []
-    while len(line) > max_chars:
-        cut = line.rfind(" ", 0, max_chars + 1)
+    while (limit := _fits(line, max_chars, max_bytes)) < len(line):
+        cut = line.rfind(" ", 0, limit + 1)
         if cut <= 0:
-            cut = max_chars
+            cut = limit
         chunks.append(line[:cut].rstrip())
         line = line[cut:].lstrip()
     if line:
@@ -52,10 +57,9 @@ def wrap(line: str, max_chars: int) -> list[str]:
 TIMESTAMP_RE = re.compile(r"^\[\d{1,2}:\d{2}(:\d{2})?\]\s*")
 
 
-def parse_reply(raw: str, nick: str, max_chars: int) -> Decision:
-    memories = [m.strip() for m in REMEMBER_RE.findall(raw) if m.strip()]
-    forgets = [m.strip() for m in FORGET_RE.findall(raw) if m.strip()]
-    raw = FORGET_RE.sub(" ", REMEMBER_RE.sub(" ", raw))
+def parse_reply(raw: str, nick: str, max_chars: int, max_bytes: int = 0) -> Decision:
+    """max_bytes: what fits in one IRC message (0 = no limit); /me lines get 9 bytes less for
+    the CTCP framing."""
     end = END in raw.upper()
     text = re.sub(r"\[(SKIP|END)\]", " ", raw, flags=re.IGNORECASE)
     echo = re.compile(rf"^(<{re.escape(nick)}>|{re.escape(nick)}\s*:)\s*", re.IGNORECASE)
@@ -67,10 +71,11 @@ def parse_reply(raw: str, nick: str, max_chars: int) -> Decision:
             continue
         # "/me does x" (or "* nick does x", copied from how others' actions look) is an action.
         if m := action.match(line):
-            lines.extend(ACTION_PREFIX + chunk for chunk in wrap(line[m.end() :], max_chars))
+            action_bytes = max(max_bytes - len("\x01ACTION \x01"), 1) if max_bytes else 0
+            lines.extend(ACTION_PREFIX + chunk for chunk in wrap(line[m.end() :], max_chars, action_bytes))
         else:
-            lines.extend(wrap(line, max_chars))
-    return Decision(lines=lines, end=end, memories=memories, forgets=forgets)
+            lines.extend(wrap(line, max_chars, max_bytes))
+    return Decision(lines=lines, end=end)
 
 
 def _normalize(text: str) -> str:
@@ -95,6 +100,7 @@ class Conversation:
         self.active = False
         self.last_involved = 0.0
         self.answered_seq = 0  # history seq of the last message the model has already responded to
+        self.crossed = 0  # messages sent while the bot's last reply was being written
 
     def activate(self) -> None:
         self.active = True
